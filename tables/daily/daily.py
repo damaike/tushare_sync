@@ -17,7 +17,7 @@ tushare 接口说明：https://tushare.pro/document/2?doc_id=27
 import os
 import datetime
 from utils.utils import exec_create_table_script, exec_sync_with_spec_date_column, query_last_sync_date, max_date, \
-    get_cfg
+    get_cfg, CONST_BEGIN_DATE
 
 
 def exec_sync(start_date, end_date):
@@ -51,11 +51,10 @@ def sync(drop_exist):
     exec_create_table_script(dir_path, drop_exist)
 
     # 查询历史最大同步日期
-    begin_date = '20100101'
     cfg = get_cfg()
     date_query_sql = "select max(trade_date) date from %s.daily" % cfg['mysql']['database']
     last_date = query_last_sync_date(date_query_sql)
-    start_date = max_date(last_date, begin_date)
+    start_date = max_date(last_date, CONST_BEGIN_DATE)
     end_date = str(datetime.datetime.now().strftime('%Y%m%d'))
 
     exec_sync(start_date, end_date)

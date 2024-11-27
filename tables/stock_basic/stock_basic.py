@@ -14,7 +14,7 @@ tushare 接口说明： https://tushare.pro/document/2?doc_id=25
 
 import os
 
-from utils.utils import exec_create_table_script, get_tushare_api, get_mock_connection, get_logger
+from utils.utils import exec_create_table_script, get_tushare_api, get_mock_connection, get_logger, CONST_BEGIN_DATE
 
 
 # 全量初始化表数据

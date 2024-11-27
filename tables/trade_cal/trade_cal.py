@@ -16,7 +16,7 @@ import datetime
 import os
 
 from utils.utils import exec_create_table_script, exec_sync_with_spec_date_column_v2, get_cfg, query_last_sync_date, \
-    max_date
+    max_date, CONST_BEGIN_DATE
 
 
 def exec_sync(start_date, end_date):
@@ -44,11 +44,10 @@ def sync(drop_exist):
     exec_create_table_script(dir_path, drop_exist)
 
     # 查询历史最大同步日期
-    begin_date = '19901221'
     cfg = get_cfg()
     date_query_sql = "select max(cal_date) date from %s.trade_cal" % cfg['mysql']['database']
     last_date = query_last_sync_date(date_query_sql)
-    start_date = max_date(last_date, begin_date)
+    start_date = max_date(last_date, CONST_BEGIN_DATE)
     end_date = str(datetime.datetime.now().strftime('%Y%m%d'))
 
     exec_sync(start_date, end_date)

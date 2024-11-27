@@ -16,6 +16,7 @@ import pymysql
 import tushare as ts
 from sqlalchemy import create_engine
 
+CONST_BEGIN_DATE = '20100101'
 
 # 加载配置信息函数
 def get_cfg():
@@ -33,7 +34,7 @@ def get_mock_connection():
     db_password = cfg['mysql']['password']
     db_port = cfg['mysql']['port']
     db_database = cfg['mysql']['database']
-    db_url = 'mysql://%s:%s@%s:%s/%s?charset=utf8&use_unicode=1' % (db_user, db_password, db_host, db_port, db_database)
+    db_url = f'mysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_database}?charset=utf8&use_unicode=1'
     return create_engine(db_url)
 
 
@@ -62,12 +63,12 @@ def get_logger(log_name, file_name):
     logger = logging.getLogger(log_name)
     logger.setLevel(log_level)
     log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'logs')
-    log_file = os.path.join(log_dir, '%s.%s' % (file_name, str(datetime.datetime.now().strftime('%Y-%m-%d'))))
+    log_file = os.path.join(log_dir, f'{file_name}.{str(datetime.datetime.now().strftime("%Y-%m-%d"))}')
     
     # 添加文件日志处理    
     if file_name != '':
         if not os.path.exists(log_dir):
-            logger.info("Make logger dir [%s]" % str(log_dir))
+            logger.info(f"Make logger dir [{str(log_dir)}]")
             os.makedirs(log_dir)
         clen_file = os.path.join(log_dir, 'file_name.%s' %
                                  str((datetime.datetime.now() +
@@ -89,7 +90,7 @@ def get_logger(log_name, file_name):
     console_handler.setFormatter(console_formatter)
     logger.addHandler(console_handler)
 
-    logger.info("Logger File [%s]" % log_file)
+    logger.info(f"Logger File [{log_file}]")
     
     return logger
 
@@ -141,7 +142,7 @@ def exec_create_table_script(script_dir, drop_exist):
             command = commandSQL.strip()
             if command != '':
                 try:
-                    logger.info('Execute SQL [%s]' % command.strip())
+                    logger.info(f'Execute SQL [{command.strip()}]')
                     cursor.execute(command.strip() + ';')
                     count = count + 1
                     suc_cnt = suc_cnt + 1
@@ -150,15 +151,15 @@ def exec_create_table_script(script_dir, drop_exist):
                     print(command)
                     flt_cnt = flt_cnt + 1
                     pass
-        logger.info('Execute result: Total [%s], Succeed [%s] , Failed [%s] ' % (count, suc_cnt, flt_cnt))
+        logger.info(f'Execute result: Total [{count}], Succeed [{suc_cnt}] , Failed [{flt_cnt}] ')
         cursor.close()
         db.close()
         if flt_cnt > 0:
-            raise Exception('Execute SQL script [%s] failed. ' % script_dir)
+            raise Exception(f'Execute SQL script [{script_dir}] failed. ')
 
 
 def query_table_is_exist(table_name):
-    sql = "SELECT count(1) from information_schema.TABLES t WHERE t.TABLE_NAME ='%s'" % table_name
+    sql = f"SELECT count(1) from information_schema.TABLES t WHERE t.TABLE_NAME ='{table_name}'"
     conn = get_mysql_connection()
     cursor = conn.cursor()
     cursor.execute(sql + ';')
@@ -186,7 +187,7 @@ def query_last_sync_date(sql):
     result = "19700101"
     if last_date is not None:
         result = str(last_date)
-    logger.info("Query last sync date with sql [%s], result: [%s]" % (sql, result))
+    logger.info(f"Query last sync date with sql [{sql}], result: [{result}]")
     return result
 
 
@@ -217,8 +218,7 @@ def get_ts_code_list(interval, ts_code_limit):
     result = pd.Series(data=None, index=None, name=None, dtype=str)
     ts_code_offset = 0  # 读取偏移量
     while True:
-        logger.info("Query ts_code from tushare with api[stock_basic] from ts_code_offset[%d] ts_code_limit[%d]"
-                    % (ts_code_offset, ts_code_limit))
+        logger.info(f"Query ts_code from tushare with api[stock_basic] from ts_code_offset[{ts_code_offset}] ts_code_limit[{ts_code_limit}]")
         df_ts_code = ts_api.stock_basic(**{
             "limit": 1000,
             "offset": ts_code_offset
@@ -228,8 +228,7 @@ def get_ts_code_list(interval, ts_code_limit):
         time.sleep(interval)
         if df_ts_code.last_valid_index() is not None:
             ts_code = df_ts_code['ts_code']
-            logger.info("Query ts_code from tushare with api[stock_basic] from ts_code_offset[%d] ts_code_limit[%d]:"
-                        " Result[%s]" % (ts_code_offset, ts_code_limit, ts_code.str.cat(sep=',')))
+            logger.info(f"Query ts_code from tushare with api[stock_basic] from ts_code_offset[{ts_code_offset}] ts_code_limit[{ts_code_limit}]: Result[{ts_code.str.cat(sep=',')}]")
             result = pd.concat([result, ts_code], axis=0)
         else:
             break
@@ -253,14 +252,12 @@ def exec_sync_with_ts_code(table_name, api_name, fields, date_column, start_date
     while cur_retry < max_retry:
         try:
             # 清理历史数据
-            clean_sql = "DELETE FROM %s.%s WHERE %s>='%s' AND %s<='%s'" % \
-                        (database_name, table_name, date_column, start_date, date_column, end_date)
-            logger.info('Execute Clean SQL [%s]' % clean_sql)
+            clean_sql = f"DELETE FROM {database_name}.{table_name} WHERE {date_column}>='{start_date}' AND {date_column}<='{end_date}'"
+            logger.info(f'Execute Clean SQL [{clean_sql}]')
             counts = exec_mysql_sql(clean_sql)
-            logger.info("Execute Clean SQL Affect [%d] records" % counts)
+            logger.info(f"Execute Clean SQL Affect [{counts}] records")
 
-            logger.info("Sync table[%s] in ts_code mode start_date[%s] end_date[%s]" %
-                        (table_name, start_date, end_date))
+            logger.info(f"Sync table[{table_name}] in ts_code mode start_date[{start_date}] end_date[{end_date}]")
 
             start = datetime.datetime.strptime(start_date, '%Y%m%d')
             end = datetime.datetime.strptime(end_date, '%Y%m%d')
@@ -278,12 +275,9 @@ def exec_sync_with_ts_code(table_name, api_name, fields, date_column, start_date
                     ts_code = ts_codes[ts_code_start:ts_code_end].str.cat(sep=',')
                     while True:
                         logger.info(
-                            "Query [%s] from tushare with api[%s] start_date[%s] end_date[%s] "
-                            "ts_code_start[%d] ts_code_end[%d] ts_code[%s]"
-                            " from offset[%d] limit[%d]" %
-                            (table_name, api_name, start_date, end_date,
-                             ts_code_start, ts_code_end, ts_code,
-                             offset, limit))
+                            f"Query [{table_name}] from tushare with api[{api_name}] start_date[{start_date}] end_date[{end_date}] "
+                            f"ts_code_start[{ts_code_start}] ts_code_end[{ts_code_end}] ts_code[{ts_code}]"
+                            f" from offset[{offset}] limit[{limit}]")
 
                         data = ts_api.query(api_name,
                                             **{
@@ -298,8 +292,7 @@ def exec_sync_with_ts_code(table_name, api_name, fields, date_column, start_date
                         if data.last_valid_index() is not None:
                             size = data.last_valid_index() + 1
                             logger.info(
-                                'Write [%d] records into table [%s] with [%s]' % (
-                                    size, table_name, connection.engine))
+                                f'Write [{size}] records into table [{table_name}] with [{connection.engine}]')
                             data.to_sql(table_name, connection, index=False, if_exists='append', chunksize=limit)
                             offset = offset + size
                             if size < limit:
@@ -488,7 +481,6 @@ def exec_sync_with_spec_date_column_v2(table_name, api_name, fields, date_column
                 continue
             else:
                 raise e
-
 
 if __name__ == '__main__':
     ts_codes_1 = get_ts_code_list(0.3, 1000)
