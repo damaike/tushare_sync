@@ -14,4 +14,4 @@ CREATE TABLE `name_change`
      KEY `name_change_ts_code` (`ts_code`) USING BTREE
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
-  COLLATE = utf8mb4_0900_ai_ci COMMENT ='股票曾用名';
+  COMMENT ='股票曾用名';

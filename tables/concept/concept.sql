@@ -12,4 +12,4 @@ CREATE TABLE `concept`
      KEY `concept_name` (`name`, `code`) USING BTREE
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
-  COLLATE = utf8mb4_0900_ai_ci COMMENT ='沪深股票-市场参考数据-概念股分类（已经停止维护）';
+  COMMENT ='沪深股票-市场参考数据-概念股分类（已经停止维护）';

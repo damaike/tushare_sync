@@ -63,6 +63,8 @@ def get_logger(log_name, file_name):
     logger.setLevel(log_level)
     log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'logs')
     log_file = os.path.join(log_dir, '%s.%s' % (file_name, str(datetime.datetime.now().strftime('%Y-%m-%d'))))
+    
+    # 添加文件日志处理    
     if file_name != '':
         if not os.path.exists(log_dir):
             logger.info("Make logger dir [%s]" % str(log_dir))
@@ -79,7 +81,16 @@ def get_logger(log_name, file_name):
         formatter = logging.Formatter(file_fmt)
         handler.setFormatter(formatter)
         logger.addHandler(handler)
+
+    # 添加控制台处理器
+    console_handler = logging.StreamHandler()
+    console_fmt = '[%(asctime)s] [%(levelname)s] [ %(filename)s:%(lineno)s - %(name)s ] %(message)s '
+    console_formatter = logging.Formatter(console_fmt)
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+
     logger.info("Logger File [%s]" % log_file)
+    
     return logger
 
 
@@ -100,7 +111,12 @@ def exec_create_table_script(script_dir, drop_exist):
     :param drop_exist: 如果表存在是否先 Drop 后再重建
     :return:
     """
-    table_name = str(script_dir).split('/')[-1]
+    table_name = str(script_dir)
+    if '/' in table_name:
+        table_name = str(script_dir).split('/')[-1]
+    elif '\\' in table_name:
+        table_name = str(script_dir).split('\\')[-1]
+        
     table_exist = query_table_is_exist(table_name)
     if (not table_exist) | (table_exist & drop_exist):
         cfg = get_cfg()
@@ -116,7 +132,7 @@ def exec_create_table_script(script_dir, drop_exist):
                 if filename.endswith('.sql'):
                     dir_name = os.path.dirname(os.path.abspath(__file__))
                     full_name = os.path.join(dir_name, script_dir, filename)
-                    file_object = open(full_name)
+                    file_object = open(full_name, "r", encoding="utf-8")
                     for line in file_object:
                         if not line.startswith("--") and not line.startswith('/*'):  # 处理注释
                             str1 = str1 + ' ' + ' '.join(line.strip().split())  # pymysql一次只能执行一条sql语句

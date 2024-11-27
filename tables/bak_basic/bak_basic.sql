@@ -33,4 +33,4 @@ CREATE TABLE `bak_basic`
      KEY `bak_basic_ts_code` (`ts_code`, `trade_date`) USING BTREE
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
-  COLLATE = utf8mb4_0900_ai_ci COMMENT ='备用列表';
+  COMMENT ='备用列表';

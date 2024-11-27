@@ -13,4 +13,4 @@ CREATE TABLE `hs_const`
      KEY `hs_const_ts_code` (`ts_code`) USING BTREE
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
-  COLLATE = utf8mb4_0900_ai_ci COMMENT ='沪深股通成份股';
+  COMMENT ='沪深股通成份股';

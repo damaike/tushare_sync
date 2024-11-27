@@ -13,4 +13,4 @@ CREATE TABLE `trade_cal`
      KEY `trade_cal_cal_date` (`cal_date`, `exchange`) USING BTREE
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
-  COLLATE = utf8mb4_0900_ai_ci COMMENT ='交易日历';
+  COMMENT ='交易日历';

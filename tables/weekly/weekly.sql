@@ -20,7 +20,7 @@ CREATE TABLE `weekly`
     UNIQUE KEY `daily_trade_date_idx` (`trade_date`, `ts_code`) USING BTREE
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
-  COLLATE = utf8mb4_0900_ai_ci COMMENT ='沪深股票-行情数据-A股周线行情'
+  COMMENT ='沪深股票-行情数据-A股周线行情'
     /*!50100 PARTITION BY RANGE (`trade_date`)
     (PARTITION p1990 VALUES LESS THAN (19901231) ENGINE = InnoDB,
     PARTITION p1991 VALUES LESS THAN (19911231) ENGINE = InnoDB,
