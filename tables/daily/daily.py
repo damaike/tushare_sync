@@ -43,8 +43,6 @@ def exec_sync(start_date, end_date):
         limit=5000,
         interval=0.3)
 
-
-# 全量初始化表数据
 def sync(drop_exist):
     # 创建表
     dir_path = os.path.join(os.path.dirname(os.path.abspath(__file__)))

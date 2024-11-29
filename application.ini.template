@@ -4,11 +4,10 @@ user=wwb
 password=wwbwwb
 port=3306
 database=tushare
-
+sql_folder=sql
 
 [tushare]
 token=0f35d49e0a00dfa6b1ccf6ab867bf448f002ce6a501fb9ea32cb1241
-
 
 [logging]
 level=INFO
