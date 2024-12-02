@@ -1,6 +1,20 @@
-
-
-import tushare as ts
+def read_file_to_string(file_path: str) -> str:
+    """
+    读取文本文件内容到字符串
+    
+    Args:
+        file_path: 文件路径
+    
+    Returns:
+        文件内容字符串
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return f.read()
+    except FileNotFoundError:
+        raise FileNotFoundError(f"找不到文件: {file_path}")
+    except Exception as e:
+        raise Exception(f"读取文件时发生错误: {str(e)}")
 
 if __name__ == '__main__':
     pro = ts.pro_api()

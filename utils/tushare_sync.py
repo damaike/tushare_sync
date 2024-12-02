@@ -14,7 +14,7 @@ import time
 import pandas as pd
 import pymysql
 import tushare as ts
-from sqlalchemy import create_engine
+import sqlalchemy
 
 class TushareSync:
     _BEGIN_DATE = '20100101'
@@ -25,16 +25,19 @@ class TushareSync:
         self.limit = TushareSync._LIMIT
         self.interval = TushareSync._INTERVAL
 
+        self._init_env()
+        self.set_sync_setting(table_name, api_name, fields, date_column, end_date)
+
+    # 初始化环境变量
+    def _init_env(self):
         self._cfg = None
         self._tushare_api = None
         self._logger = None
-        self._mysql_connection = None
-        self._mock_connection = None
-
-        self.sync_setting(table_name, api_name, fields, date_column, end_date)
+        self._mysql_conn = None
+        self._sqlalchemy_conn = None
 
     # 设置同步相关参数
-    def sync_setting(self, table_name, api_name, fields, date_column, end_date):
+    def set_sync_setting(self, table_name, api_name, fields, date_column, end_date):
         self.table_name = table_name
         self.api_name = api_name
         self.fields = fields
@@ -42,11 +45,11 @@ class TushareSync:
         self.end_date = end_date
 
     def __del__(self):
-        if self._mysql_connection:
-            self._mysql_connection.close()
+        if self._mysql_conn:
+            self._mysql_conn.close()
 
-        if self._mock_connection:
-            self._mock_connection.dispose()
+        if self._sqlalchemy_conn:
+            self._sqlalchemy_conn.dispose()
 
 
     @property
@@ -64,17 +67,9 @@ class TushareSync:
         
         return self._cfg
 
-    def get_sql_folder(self):
-        cfg = self.get_cfg()
-        return cfg['mysql']['sql_folder']
-    
-    def get_table_sql_filepath(self):
-        sql_folder = self.get_sql_folder()
-        return os.path.join(os.getcwd(), sql_folder, f'{self.table_name}.sql')
-
-    # 获取 MySQL Connection 对象
-    def get_mock_connection(self):
-        if self._mock_connection is None:
+    # 获取 SQLAlchemy Connection 对象
+    def get_db_conn(self):
+        if self._sqlalchemy_conn is None:
             cfg = self.get_cfg()
             db_host = cfg['mysql']['host']
             db_user = cfg['mysql']['user']
@@ -82,34 +77,69 @@ class TushareSync:
             db_port = cfg['mysql']['port']
             db_database = cfg['mysql']['database']
             db_url = f'mysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_database}?charset=utf8&use_unicode=1'
-            self._mock_connection = create_engine(db_url)
+            self._sqlalchemy_conn = sqlalchemy.create_engine(db_url)
         
-        return self._mock_connection
+        return self._sqlalchemy_conn
 
-    def get_mysql_connection(self):
-        if self._mysql_connection is None:
+    # 获取 pymysql Connection 对象
+    def get_pymysql_conn(self):
+        if self._mysql_conn is None:
             cfg = self.get_cfg()
-            self._mysql_connection = pymysql.connect(host=cfg['mysql']['host'],
+            self._mysql_conn = pymysql.connect(host=cfg['mysql']['host'],
                             port=int(cfg['mysql']['port']),
                             user=cfg['mysql']['user'],
                             passwd=cfg['mysql']['password'],
                             db=cfg['mysql']['database'],
                             charset='utf8')
             
-        return self._mysql_connection
+        return self._mysql_conn
     
-    # 执行 MySQL SQL 语句，使用 pymsql
-    def exec_mysql_sql(self, sql):
-        conn = self.get_mysql_connection()
-        cursor = conn.cursor()
-        counts = cursor.execute(sql + ';')
-        conn.commit()
-        cursor.close()
-        return counts
+    def is_table_exist(self):
+        return self.get_count_from_sql(f"SELECT COUNT(1) FROM information_schema.TABLES WHERE TABLE_NAME='{self.table_name}'") > 0
+    
+    
+    def _clean_sql(self, s: str) -> str:
+        """
+        删除SQL字符串中每行的注释内容（# 后面的部分）
+        
+        Args:
+            s: 包含SQL语句的多行字符串
+        
+        Returns:
+            清理后的SQL字符串
+        """
+        # 按行分割字符串
+        lines = s.split('\n')
+        # 处理每一行，删除#后面的内容
+        cleaned_lines = [line.split('#')[0].rstrip() for line in lines]
+        # 重新组合成字符串，去除空行
+        return '\n'.join(line for line in cleaned_lines if line.strip())
+
+
+    # 执行一条 SQL 语句，返回 results
+    def exec_sql(self, sql):
+        clean_sql = self._clean_sql(sql)
+
+        result = None
+
+        # 执行多条语句
+        for row in clean_sql.split(';'):
+            if row.strip() != '':
+                result = self.get_db_conn().execute(sqlalchemy.text(row))
+
+        return result
+    
+    # 执行一条 SQL 语句，返回结果中的第一个值
+    def get_count_from_sql(self, sql):
+        return self.exec_sql(sql).fetchone()[0]
 
     # 将tushare dataframe 数据写入数据库, 使用 SQLAlchemy
     def save_datafame_to_db(self, data, if_exists="append"):
-        data.to_sql(self.table_name, self.get_mock_connection(), index=False, if_exists=if_exists, chunksize=self.limit)
+        sqlalchemy_conn = self.get_db_conn()
+        if sqlalchemy_conn:
+            data.to_sql(self.table_name, sqlalchemy_conn, index=False, if_exists=if_exists, chunksize=self.limit)
+        else:
+            raise Exception("创建 sqlalchemy conn 失败.")
 
     # 构建 Tushare 查询 API 接口对象
     def get_tushare_api(self):
@@ -120,24 +150,32 @@ class TushareSync:
         
         return self.tushare_api
 
+    
+    def log_info(self, msg):
+        self.get_logger().info(msg)
+
     # 获取日志文件打印输出对象
-    def get_logger(self, log_name, file_name):
+    def get_logger(self):
         if self._logger:
             return self._logger
+        
+        log_name = self.table_name
+        file_name = cfg['logging']['filename']
         
         cfg = self.get_cfg()    
         log_level = cfg['logging']['level']
         backup_days = int(cfg['logging']['backupDays'])
         logger = logging.getLogger(log_name)
         logger.setLevel(log_level)
-        log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'logs')
+        log_dir = os.path.join(os.getcwd(), 'logs')
         log_file = os.path.join(log_dir, f'{file_name}.{str(datetime.datetime.now().strftime("%Y-%m-%d"))}')
         
         # 添加文件日志处理    
         if file_name != '':
             if not os.path.exists(log_dir):
-                logger.info(f"Make logger dir [{str(log_dir)}]")
+                logger.info(f"创建日志文件夹 [{str(log_dir)}]")
                 os.makedirs(log_dir)
+
             clen_file = os.path.join(log_dir, 'file_name.%s' %
                                     str((datetime.datetime.now() +
                                         datetime.timedelta(days=-backup_days)).strftime('%Y-%m-%d'))
@@ -145,6 +183,7 @@ class TushareSync:
 
             if os.path.exists(clen_file):
                 os.remove(clen_file)
+
             handler = logging.FileHandler(log_file, encoding='utf-8')
             file_fmt = '[%(asctime)s] [%(levelname)s] [ %(filename)s:%(lineno)s - %(name)s ] %(message)s '
             formatter = logging.Formatter(file_fmt)
@@ -158,11 +197,20 @@ class TushareSync:
         console_handler.setFormatter(console_formatter)
         logger.addHandler(console_handler)
 
-        logger.info(f"Logger File [{log_file}]")
+        logger.info(f"日志文件： [{log_file}]")
 
         self._logger = logger
         return self._logger
 
+    # 获取 SQL 脚本存储文件夹
+    def get_sql_folder(self):
+        cfg = self.get_cfg()
+        return cfg['mysql']['sql_folder']
+    
+    # 获取表 SQL 脚本文件绝对路径
+    def get_table_sql_filepath(self):
+        sql_folder = self.get_sql_folder()
+        return os.path.join(os.getcwd(), sql_folder, f'{self.table_name}.sql')
 
     # 数据库中建表
     def exec_create_table_script(self, drop_exist):
@@ -175,45 +223,21 @@ class TushareSync:
         table_exist = self.query_table_is_exist(self.table_name)
 
         if (drop_exist) or (not table_exist):
-            cfg = self.get_cfg()
-            logger = self.get_logger(self.table_name, cfg['logging']['filename'])
-            db = self.get_mysql_connection()
-            cursor = db.cursor()
-            count = 0
-            flt_cnt = 0
-            suc_cnt = 0
-            str1 = ''
+            self.exec_sql(f"DROP TABLE IF EXISTS {self.table_name};") 
 
-            cursor.execute(f"DROP TABLE IF EXISTS {self.table_name};") 
+            table_sql = ""
+            with open(table_sql_filepath, "r", encoding="utf-8") as table_file:
+                table_sql = table_file.read()
 
-            with open(table_sql_filepath, "r", encoding="utf-8") as file_object:
-                for line in file_object:
-                    if not line.startswith("--") and not line.startswith('/*'):  # 处理注释
-                        str1 = str1 + ' ' + ' '.join(line.strip().split())  # pymysql一次只能执行一条sql语句
-
-
-            for commandSQL in str1.split(';'):
-                command = commandSQL.strip()
-                if command != '':
-                    try:
-                        logger.info(f'Execute SQL [{command.strip()}]')
-                        cursor.execute(command.strip() + ';')
-                        count = count + 1
-                        suc_cnt = suc_cnt + 1
-                    except db.DatabaseError as e:
-                        logger.error(e)
-                        logger.error(command)
-                        flt_cnt = flt_cnt + 1
-                        pass
-            logger.info(f'Execute result: Total [{count}], Succeed [{suc_cnt}] , Failed [{flt_cnt}] ')
-            cursor.close()
-            if flt_cnt > 0:
-                raise Exception(f'Execute SQL script [{table_sql_filepath}] failed. ')
+            self.exec_sql(table_sql)
+            
+            # todo, write log
+            # self.log_info(f'Execute result: Total [{count}], Succeed [{suc_cnt}] , Failed [{flt_cnt}] ')
 
 
     def query_table_is_exist(self, table_name):
         sql = f"SELECT count(1) from information_schema.TABLES t WHERE t.TABLE_NAME ='{table_name}'"
-        conn = self.get_mysql_connection()
+        conn = self.get_pymysql_conn()
         cursor = conn.cursor()
         cursor.execute(sql + ';')
         count = cursor.fetchall()[0][0]
@@ -230,7 +254,7 @@ class TushareSync:
         :return: 查询结果
         """
         logger = self.get_logger("utils", 'data_syn.log')
-        conn = self.get_mysql_connection()
+        conn = self.get_pymysql_conn()
         cursor = conn.cursor()
         cursor.execute(sql + ';')
         result = cursor.fetchall()
@@ -304,7 +328,7 @@ class TushareSync:
                 # 清理历史数据
                 clean_sql = f"DELETE FROM {database_name}.{self.table_name} WHERE {self.date_column}>='{start_date}' AND {self.date_column}<='{end_date}'"
                 logger.info(f'Execute Clean SQL [{clean_sql}]')
-                counts = self.exec_mysql_sql(clean_sql)
+                counts = self.get_count_from_sql(clean_sql)
                 logger.info(f"Execute Clean SQL Affect [{counts}] records")
 
                 logger.info(f"Sync table[{self.table_name}] in ts_code mode start_date[{start_date}] end_date[{end_date}]")
@@ -376,7 +400,7 @@ class TushareSync:
 
         # 创建 API / Connection / Logger 对象
         ts_api = self.get_tushare_api()
-        connection = self.get_mock_connection()
+        connection = self.get_db_conn()
         logger = self.get_logger(self.table_name, 'data_syn.log')
 
         cfg = self.get_cfg()
@@ -390,7 +414,7 @@ class TushareSync:
                 clean_sql = "DELETE FROM %s.%s WHERE %s>='%s' AND %s<='%s'" % \
                             (database_name, self.table_name, self.date_column, start_date, self.date_column, end_date)
                 logger.info('Execute Clean SQL [%s]' % clean_sql)
-                counts = self.exec_mysql_sql(clean_sql)
+                counts = self.get_count_from_sql(clean_sql)
                 logger.info("Execute Clean SQL Affect [%d] records" % counts)
 
                 # 数据同步时间开始时间和结束时间, 包含前后边界
@@ -450,7 +474,7 @@ class TushareSync:
 
         # 创建 API / Connection / Logger 对象
         ts_api = self.get_tushare_api()
-        connection = self.get_mock_connection()
+        connection = self.get_db_conn()
         logger = self.get_logger(self.table_name, 'data_syn.log')
 
         cfg = self.get_cfg()
@@ -463,7 +487,7 @@ class TushareSync:
                 # 清理历史数据
                 clean_sql = f"DELETE FROM {database_name}.{self.table_name} WHERE {self.date_column}>='{start_date}' AND {self.date_column}<='{end_date}'"
                 logger.info(f'Execute Clean SQL [{clean_sql}]')
-                counts = self.exec_mysql_sql(clean_sql)
+                counts = self.get_count_from_sql(clean_sql)
                 logger.info(f"Execute Clean SQL Affect [{counts}] records")
 
                 # 数据同步时间开始时间和结束时间, 包含前后边界
