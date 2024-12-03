@@ -26,7 +26,7 @@ class TushareSync:
         self.interval = TushareSync._INTERVAL
 
         self._init_env()
-        self.set_sync_setting(table_name, api_name, fields, date_column, end_date)
+        self.set_sync_setting(table_name, api_name, date_column, end_date)
 
     # 初始化环境变量
     def _init_env(self):
@@ -37,13 +37,13 @@ class TushareSync:
         self._sqlalchemy_conn = None
 
     # 设置同步相关参数
-    def set_sync_setting(self, table_name, api_name, fields, date_column, end_date=""):
+    def set_sync_setting(self, table_name, api_name, date_column, end_date=""):
         self.table_name = table_name
         self.api_name = api_name
         self.date_column = date_column
         self.fields = self.get_fields()
         if not end_date:
-            end_date = str(datetime.datetime.now().strftime('%Y%m%d'))
+            end_date = self.today()
         self.end_date = end_date
 
     def __del__(self):
@@ -108,12 +108,15 @@ class TushareSync:
         for line in lines:
             line = line.strip()
             # 跳过空行和非字段定义行
-            if not line or line.startswith(('CREATE', 'DROP', ')', 'ENGINE', 'UNIQUE', '/*!', 'PARTITION')):
-                continue
-                
-            # 提取字段名
-            if '`' in line:
+            if not line or line.startswith(('CREATE', 'DROP', ')', 'ENGINE', 'UNIQUE', '/*!', 'PARTITION', '--')):
+               continue
+
+            #if '`' in line:
+            if line.startswith('`'):
+                # 提取字段名
                 column_name = line.split('`')[1]  # 获取第一对反引号中的内容
+                if column_name=="created_time" or column_name=="updated_time":
+                    continue
                 columns.append(column_name)
         
         return columns
@@ -127,7 +130,7 @@ class TushareSync:
             table_sql = f.read()
         return table_sql
 
-    def is_table_exist(self):
+    def table_exist(self):
         return self.get_one_from_sql(f"SELECT COUNT(1) FROM information_schema.TABLES WHERE TABLE_NAME='{self.table_name}'") > 0
     
     
@@ -183,6 +186,25 @@ class TushareSync:
         
         return self.tushare_api
 
+    def exec_tushare_func(self, date, offset, sleep=True):
+        """
+        执行tushare API 函数
+        自动休眠 interval 秒，防止对tushare API 的频繁调用
+        """
+        ts_api = self.get_tushare_api()
+        data = ts_api.query(self.api_name,
+                            **{
+                                self.date_column: date,
+                                "start_date": date,
+                                "end_date": date,
+                                "offset": offset,
+                                "limit": self.limit
+                            },
+                            fields=self.fields)
+        if sleep:
+            time.sleep(self.interval)
+        return data
+    
     
     def log_info(self, msg):
         self.get_logger().info(msg)
@@ -207,7 +229,7 @@ class TushareSync:
         logger = logging.getLogger(log_name)
         logger.setLevel(log_level)
         log_dir = os.path.join(os.getcwd(), 'logs')
-        log_file = os.path.join(log_dir, f'{file_name}.{str(datetime.datetime.now().strftime("%Y-%m-%d"))}')
+        log_file = os.path.join(log_dir, f'{file_name}.{self.today()}')
         
         # 添加文件日志处理    
         if file_name != '':
@@ -302,20 +324,24 @@ class TushareSync:
         return result
 
 
-    # 获取两个日期的最小值
     def min_date(self, date1, date2):
+        """
+        获取两个日期的最小值
+        """
         return date1 if date1 <= date2 else date2
 
-    # 获取两个日期的最大值
+
     def max_date(self, date1, date2):
+        """
+        获取两个日期的最大值
+        """
         return date1 if date1 >= date2 else date2
     
     
-
-
     def sync_from_tushare_to_db(self, start_date, end_date):
         """
         将数据从tushare同步到数据库
+
         :param start_date: 开始时间
         :param end_date: 结束时间
         :return: None
@@ -334,31 +360,20 @@ class TushareSync:
             self.log_info(f'Execute Clean SQL {self.table_name}: {start_date} ~ {end_date}')
 
             # 数据同步时间开始时间和结束时间, 包含前后边界
-            start = datetime.datetime.strptime(start_date, '%Y%m%d')
-            end = datetime.datetime.strptime(end_date, '%Y%m%d')
+            start = self.str_to_date(start_date)
+            end = self.str_to_date(end_date)
 
             date = start
-
             while date <= end:
                 step_date = str(date.strftime('%Y%m%d'))
                 offset = 0
                 while True:
                     self.log_info(f"Tushare API: {self.api_name} {self.date_column}[{step_date}] from offset[{offset}] limit[{self.limit}]")
-                    data = ts_api.query(self.api_name,
-                                        **{
-                                            self.date_column: step_date,
-                                            "start_date": step_date,
-                                            "end_date": step_date,
-                                            "offset": offset,
-                                            "limit": self.limit
-                                        },
-                                        fields=self.fields)
-                    time.sleep(self.interval)
+                    data = self.exec_tushare_func(step_date, offset)
                     if data.last_valid_index() is not None:
                         size = data.last_valid_index() + 1
                         self.log_info(f"Write [{size}] records into table [{self.table_name}]")
                         
-                        # data.to_sql(self.table_name, connection, index=False, if_exists='append', chunksize=self.limit)
                         self.save_datafame_to_db(data)
 
                         offset = offset + size
@@ -372,13 +387,22 @@ class TushareSync:
         except Exception as e:
             self.log_error("Get Exception[%s]" % e.__cause__)
 
+    def date_to_str(self, date):
+        return datetime.datetime.strftime(date, '%Y%m%d')
+    
+    def str_to_date(self, date_str):
+        return datetime.datetime.strptime(date_str, '%Y%m%d')
+
+    def today(self):
+        return self.date_to_str(datetime.datetime.today())
+
 
     def full_sync(self):
         """
         全量初始化表数据
         """
         self.create_table(True)
-        end_date = str(datetime.datetime.now().strftime('%Y%m%d'))
+        end_date = self.today()
         self.sync_from_tushare_to_db(self.BEGIN_DATE, end_date)
 
 
@@ -390,7 +414,7 @@ class TushareSync:
         # 查询历史最大同步日期
         last_date = self.get_one_from_sql(f"select max({self.date_column}) from {self.table_name}")
         start_date = self.max_date(last_date, self.BEGIN_DATE)
-        end_date = str(datetime.datetime.now().strftime('%Y%m%d'))
+        end_date = self.today()
 
         self.sync_from_tushare_to_db(start_date, end_date)
 
