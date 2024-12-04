@@ -67,7 +67,7 @@ class TushareSync:
         return self._cfg
 
     # 获取 SQLAlchemy Connection 对象
-    def get_db_conn(self):
+    def get_db_engine(self):
         if self._sqlalchemy_conn is None:
             cfg = self.get_cfg()
             db_host = cfg['mysql']['host']
@@ -131,8 +131,9 @@ class TushareSync:
         """
         检查表是否存在
         """
-        if not table_name:
+        if table_name=="":
             table_name = self.table_name
+            
         return self._fetch_one_from_db(
             f"SELECT COUNT(1) FROM information_schema.TABLES WHERE TABLE_NAME='{table_name}'"
             ) > 0
@@ -172,10 +173,10 @@ class TushareSync:
         result = None
 
         # 执行多条语句
-        for row in clean_sql.split(';'):
-            if row.strip() != '':
-                result = self.get_db_conn().execute(sqlalchemy.text(row))
-
+        with self.get_db_engine().connect() as conn:
+            for row in clean_sql.split(';'):
+                if row.strip() != '':
+                    result = conn.execute(sqlalchemy.text(row))
         return result
     
     # 执行一条 SQL 语句，返回结果中的第一个值
@@ -184,7 +185,7 @@ class TushareSync:
 
     # 将tushare dataframe 数据写入数据库, 使用 SQLAlchemy
     def save_datafame_to_db(self, data, if_exists="append"):
-        sqlalchemy_conn = self.get_db_conn()
+        sqlalchemy_conn = self.get_db_engine()
         if sqlalchemy_conn:
             data.to_sql(self.table_name, sqlalchemy_conn, index=False, if_exists=if_exists, chunksize=self.limit)
         else:
@@ -357,7 +358,7 @@ class TushareSync:
 
         # 创建 API / Connection / Logger 对象
         ts_api = self.get_tushare_api()
-        connection = self.get_db_conn()
+        connection = self.get_db_engine()
 
         try:
             # 清理历史数据
@@ -424,39 +425,36 @@ class TushareSync:
         self.sync_from_tushare_to_db(start_date, end_date)
 
 
-def test_get_fields():
-    basic_sync = TushareSync("stock_basic", "stock_basic", "trade_date")
-    print(basic_sync._extract_fields_from_sql_script())
+def test_get_fields(sync):
+    print(sync._extract_fields_from_sql_script())
 
-def test_log():
-    sync = TushareSync("stock_basic", "stock_basic", "trade_date")
+def test_log(sync):
     sync.log_info("test log info")
     sync.log_warn("test log warn")
     sync.log_error("test log error")
 
-def test_table_exist():
-    sync = TushareSync("stock_basic", "stock_basic", "trade_date")
+def test_table_exist(sync):
     print(sync._table_exist())
 
-def test_fetch_one_from_db():
-    sync = TushareSync("stock_basic", "stock_basic", "trade_date")
-    print(sync._fetch_one_from_db("select count(1) from stock_basic"))
-
-def test_create_table():
-    sync = TushareSync("stock_basic", "stock_basic", "trade_date")
+def test_create_table(sync):
     sync.create_table(True)
 
-def test_query_tushare():
-    sync = TushareSync("stock_basic", "stock_basic", "trade_date")
+def test_fetch_one_from_db(sync):
+    print(sync._fetch_one_from_db("select count(1) from stock_basic"))
+
+def test_query_tushare(sync):
     print(sync.query_tushare("20241204", 0))
 
-def test_save_dataframe_to_db():
-    sync = TushareSync("stock_basic", "stock_basic", "trade_date")
+def test_save_dataframe_to_db(sync):
     sync.save_datafame_to_db(sync.query_tushare("20241204", 0))
 
 
 if __name__ == '__main__':
-    # test_get_fields()
-    # test_log()
-    test_table_exist()
+    sync = TushareSync("stock_basic", "stock_basic", "trade_date")
+    
+    # test_get_fields(sync)
+    # test_log(sync)
+    # test_table_exist(sync)
+    # test_create_table(sync)
+    test_fetch_one_from_db(sync)
 
