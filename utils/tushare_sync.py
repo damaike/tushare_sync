@@ -6,15 +6,12 @@
 """
 
 import configparser
-import datetime
+import os, time, datetime
 import logging
-import os
-import time
 
 import pandas as pd
-import pymysql
+import pymysql, sqlalchemy
 import tushare as ts
-import sqlalchemy
 
 class TushareSync:
     _BEGIN_DATE = '20100101' # 同步数据最早开始日期
@@ -41,7 +38,7 @@ class TushareSync:
         self.table_name = table_name
         self.api_name = api_name
         self.date_column = date_column
-        self.fields = self.get_fields()
+        self.fields = self._extract_fields_from_sql_script()
         if not end_date:
             end_date = self.today()
         self.end_date = end_date
@@ -97,11 +94,11 @@ class TushareSync:
         return self._mysql_conn
     
 
-    def get_fields(self):
+    def _extract_fields_from_sql_script(self):
         # 从建表sql脚本中读取建表SQL语句
 
         # 按行分割SQL语句
-        lines = self.get_table_sql().split('\n')
+        lines = self._read_table_sql().split('\n')
         columns = []
         
         # 遍历每一行
@@ -121,17 +118,33 @@ class TushareSync:
         
         return columns
 
-    def get_table_sql(self):
+    def _read_table_sql(self):
         """
         获取建表SQL语句
         """
         table_sql = ""
-        with open(self.get_table_filepath(), 'r', encoding='utf-8') as f:
+        with open(self.table_filepath(), 'r', encoding='utf-8') as f:
             table_sql = f.read()
         return table_sql
 
-    def table_exist(self):
-        return self.get_one_from_sql(f"SELECT COUNT(1) FROM information_schema.TABLES WHERE TABLE_NAME='{self.table_name}'") > 0
+    def _table_exist(self, table_name=""):
+        """
+        检查表是否存在
+        """
+        if not table_name:
+            table_name = self.table_name
+        return self._fetch_one_from_db(
+            f"SELECT COUNT(1) FROM information_schema.TABLES WHERE TABLE_NAME='{table_name}'"
+            ) > 0
+    
+    # def table_exist(self, table_name) -> bool:
+    #     try:
+    #         sql = f"desc {table_name};"
+    #         result = self.exec_sql(sql)
+    #         return True 
+    #     except Exception as e:
+    #         return False
+
     
     
     def _clean_sql(self, s: str) -> str:
@@ -152,7 +165,7 @@ class TushareSync:
         return '\n'.join(line for line in cleaned_lines if line.strip())
 
 
-    # 执行一条 SQL 语句，返回 results
+    # 执行 SQL 语句，返回 最后一条语句的 result
     def exec_sql(self, sql):
         clean_sql = self._clean_sql(sql)
 
@@ -166,7 +179,7 @@ class TushareSync:
         return result
     
     # 执行一条 SQL 语句，返回结果中的第一个值
-    def get_one_from_sql(self, sql):
+    def _fetch_one_from_db(self, sql):
         return self.exec_sql(sql).fetchone()[0]
 
     # 将tushare dataframe 数据写入数据库, 使用 SQLAlchemy
@@ -186,7 +199,7 @@ class TushareSync:
         
         return self.tushare_api
 
-    def exec_tushare_func(self, date, offset, sleep=True):
+    def query_tushare(self, date, offset, sleep=True):
         """
         执行tushare API 函数
         自动休眠 interval 秒，防止对tushare API 的频繁调用
@@ -220,10 +233,11 @@ class TushareSync:
         if self._logger:
             return self._logger
         
+        cfg = self.get_cfg()
+        
         log_name = self.table_name
         file_name = cfg['logging']['filename']
         
-        cfg = self.get_cfg()    
         log_level = cfg['logging']['level']
         backup_days = int(cfg['logging']['backupDays'])
         logger = logging.getLogger(log_name)
@@ -264,13 +278,13 @@ class TushareSync:
         return self._logger
 
     # 获取 SQL 脚本存储文件夹
-    def get_sql_folder(self):
+    def sql_folder(self):
         cfg = self.get_cfg()
         return cfg['mysql']['sql-folder']
     
     # 获取表 SQL 脚本文件绝对路径
-    def get_table_filepath(self):
-        sql_folder = self.get_sql_folder()
+    def table_filepath(self):
+        sql_folder = self.sql_folder()
         return os.path.join(os.getcwd(), sql_folder, f'{self.table_name}.sql')
 
     
@@ -281,10 +295,10 @@ class TushareSync:
         :return:
         """
 
-        if (drop_exist) or (not self.table_exist(self.table_name)):
+        if (drop_exist) or (not self._table_exist(self.table_name)):
             self.exec_sql(f"DROP TABLE IF EXISTS {self.table_name};") 
 
-            table_sql_filepath = self.get_table_filepath()
+            table_sql_filepath = self.table_filepath()
             table_sql = ""
             with open(table_sql_filepath, "r", encoding="utf-8") as table_file:
                 table_sql = table_file.read()
@@ -294,15 +308,6 @@ class TushareSync:
             # todo, write log
             # self.log_info(f'Execute result: Total [{count}], Succeed [{suc_cnt}] , Failed [{flt_cnt}] ')
 
-
-    def table_exist(self, table_name) -> bool:
-        try:
-            sql = f"desc {table_name};"
-            result = self.exec_sql(sql)
-            return True 
-        except Exception as e:
-            return False
-        
 
     def query_last_sync_date(self, sql):
         """
@@ -369,7 +374,7 @@ class TushareSync:
                 offset = 0
                 while True:
                     self.log_info(f"Tushare API: {self.api_name} {self.date_column}[{step_date}] from offset[{offset}] limit[{self.limit}]")
-                    data = self.exec_tushare_func(step_date, offset)
+                    data = self.query_tushare(step_date, offset)
                     if data.last_valid_index() is not None:
                         size = data.last_valid_index() + 1
                         self.log_info(f"Write [{size}] records into table [{self.table_name}]")
@@ -412,7 +417,7 @@ class TushareSync:
         """
 
         # 查询历史最大同步日期
-        last_date = self.get_one_from_sql(f"select max({self.date_column}) from {self.table_name}")
+        last_date = self._fetch_one_from_db(f"select max({self.date_column}) from {self.table_name}")
         start_date = self.max_date(last_date, self.BEGIN_DATE)
         end_date = self.today()
 
@@ -421,9 +426,37 @@ class TushareSync:
 
 def test_get_fields():
     basic_sync = TushareSync("stock_basic", "stock_basic", "trade_date")
-    print(basic_sync.get_fields())
+    print(basic_sync._extract_fields_from_sql_script())
+
+def test_log():
+    sync = TushareSync("stock_basic", "stock_basic", "trade_date")
+    sync.log_info("test log info")
+    sync.log_warn("test log warn")
+    sync.log_error("test log error")
+
+def test_table_exist():
+    sync = TushareSync("stock_basic", "stock_basic", "trade_date")
+    print(sync._table_exist())
+
+def test_fetch_one_from_db():
+    sync = TushareSync("stock_basic", "stock_basic", "trade_date")
+    print(sync._fetch_one_from_db("select count(1) from stock_basic"))
+
+def test_create_table():
+    sync = TushareSync("stock_basic", "stock_basic", "trade_date")
+    sync.create_table(True)
+
+def test_query_tushare():
+    sync = TushareSync("stock_basic", "stock_basic", "trade_date")
+    print(sync.query_tushare("20241204", 0))
+
+def test_save_dataframe_to_db():
+    sync = TushareSync("stock_basic", "stock_basic", "trade_date")
+    sync.save_datafame_to_db(sync.query_tushare("20241204", 0))
 
 
 if __name__ == '__main__':
-    test_get_fields()
+    # test_get_fields()
+    # test_log()
+    test_table_exist()
 
