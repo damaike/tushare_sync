@@ -5,6 +5,18 @@
 2. 提供 tushare DataApi 对象函数
 """
 
+"""
+日志：
+- 信息
+    - 程序开始/结束时，打印时间
+    - 同步一天数据后，显示日期，写入记录数
+    - create table 时，打印创建的表名
+    - drop table 时，打印删除的表名
+- 错误
+    - 连接数据库失败时，打印错误信息
+    - 从TuShare API 获取数据失败时，打印错误信息
+"""
+
 import configparser
 import os, time, datetime
 import logging
@@ -17,6 +29,7 @@ class TushareSync:
     _BEGIN_DATE = '20100101' # 同步数据最早开始日期
     _LIMIT = 10000 # 每次从tushare同步数据量
     _INTERVAL = 2 # 每次同步数据间隔时间
+    _MAX_RETRY = 3 # 最大重试次数
 
     def __init__(self, table_name, api_name, date_column, end_date=""):
         self.limit = TushareSync._LIMIT
@@ -30,8 +43,8 @@ class TushareSync:
         self._cfg = None
         self._tushare_api = None
         self._logger = None
-        self._mysql_conn = None
-        self._sqlalchemy_conn = None
+        # self._mysql_conn = None
+        self._sqlalchemy_db_engine = None
 
     # 设置同步相关参数
     def set_sync_setting(self, table_name, api_name, date_column, end_date=""):
@@ -44,11 +57,11 @@ class TushareSync:
         self.end_date = end_date
 
     def __del__(self):
-        if self._mysql_conn:
-            self._mysql_conn.close()
+        # if self._mysql_conn:
+        #     self._mysql_conn.close()
 
-        if self._sqlalchemy_conn:
-            self._sqlalchemy_conn.dispose()
+        if self._sqlalchemy_db_engine:
+            self._sqlalchemy_db_engine.dispose()
 
 
     @property
@@ -68,7 +81,7 @@ class TushareSync:
 
     # 获取 SQLAlchemy Connection 对象
     def get_db_engine(self):
-        if self._sqlalchemy_conn is None:
+        if self._sqlalchemy_db_engine is None:
             cfg = self.get_cfg()
             db_host = cfg['mysql']['host']
             db_user = cfg['mysql']['user']
@@ -76,22 +89,22 @@ class TushareSync:
             db_port = cfg['mysql']['port']
             db_database = cfg['mysql']['database']
             db_url = f'mysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_database}?charset=utf8&use_unicode=1'
-            self._sqlalchemy_conn = sqlalchemy.create_engine(db_url)
+            self._sqlalchemy_db_engine = sqlalchemy.create_engine(db_url)
         
-        return self._sqlalchemy_conn
+        return self._sqlalchemy_db_engine
 
-    # 获取 pymysql Connection 对象
-    def get_pymysql_conn(self):
-        if self._mysql_conn is None:
-            cfg = self.get_cfg()
-            self._mysql_conn = pymysql.connect(host=cfg['mysql']['host'],
-                            port=int(cfg['mysql']['port']),
-                            user=cfg['mysql']['user'],
-                            passwd=cfg['mysql']['password'],
-                            db=cfg['mysql']['database'],
-                            charset='utf8')
+    # # 获取 pymysql Connection 对象
+    # def get_pymysql_conn(self):
+    #     if self._mysql_conn is None:
+    #         cfg = self.get_cfg()
+    #         self._mysql_conn = pymysql.connect(host=cfg['mysql']['host'],
+    #                         port=int(cfg['mysql']['port']),
+    #                         user=cfg['mysql']['user'],
+    #                         passwd=cfg['mysql']['password'],
+    #                         db=cfg['mysql']['database'],
+    #                         charset='utf8')
             
-        return self._mysql_conn
+    #     return self._mysql_conn
     
 
     def _extract_fields_from_sql_script(self):
@@ -177,6 +190,7 @@ class TushareSync:
             for row in clean_sql.split(';'):
                 if row.strip() != '':
                     result = conn.execute(sqlalchemy.text(row))
+            conn.commit()
         return result
     
     # 执行一条 SQL 语句，返回结果中的第一个值
@@ -185,97 +199,102 @@ class TushareSync:
 
     # 将tushare dataframe 数据写入数据库, 使用 SQLAlchemy
     def save_datafame_to_db(self, data, if_exists="append"):
-        sqlalchemy_conn = self.get_db_engine()
-        if sqlalchemy_conn:
-            data.to_sql(self.table_name, sqlalchemy_conn, index=False, if_exists=if_exists, chunksize=self.limit)
+        db_engine = self.get_db_engine()
+        if db_engine:
+            data.to_sql(self.table_name, db_engine, index=False, if_exists=if_exists, chunksize=self.limit)
         else:
             raise Exception("创建 sqlalchemy conn 失败.")
 
     # 构建 Tushare 查询 API 接口对象
     def get_tushare_api(self):
-        if self.tushare_api is None:
+        if self._tushare_api is None:
             cfg = self.get_cfg()
             token = cfg['tushare']['token']
-            self.tushare_api = ts.pro_api(token=token, timeout=300)
+            self._tushare_api = ts.pro_api(token=token, timeout=300)
         
-        return self.tushare_api
+        return self._tushare_api
 
-    def query_tushare(self, date, offset, sleep=True):
+    def query_tushare(self, date, offset=0, sleep=True):
         """
         执行tushare API 函数
         自动休眠 interval 秒，防止对tushare API 的频繁调用
         """
-        ts_api = self.get_tushare_api()
-        data = ts_api.query(self.api_name,
-                            **{
-                                self.date_column: date,
-                                "start_date": date,
-                                "end_date": date,
-                                "offset": offset,
-                                "limit": self.limit
-                            },
-                            fields=self.fields)
-        if sleep:
-            time.sleep(self.interval)
-        return data
+        try:
+            ts_api = self.get_tushare_api()
+            data = ts_api.query(self.api_name,
+                                **{
+                                    self.date_column: date,
+                                    "start_date": date,
+                                    "end_date": date,
+                                    "offset": offset,
+                                    "limit": self.limit
+                                },
+                                fields=self.fields)
+            if sleep:
+                time.sleep(self.interval)
+            return data
+        except Exception as e:
+            return None
     
     
-    def log_info(self, msg):
-        self.get_logger().info(msg)
+    # def log_info(self, msg):
+    #     self.get_logger().info(msg)
 
-    def log_warn(self, msg):
-        self.get_logger().warn(msg)
+    # def log_warning(self, msg):
+    #     self.get_logger().warning(msg)
 
-    def log_error(self, msg):
-        self.get_logger().error(msg)
+    # def log_error(self, msg):
+    #     self.get_logger().error(msg)
 
     # 获取日志文件打印输出对象
     def get_logger(self):
-        if self._logger:
-            return self._logger
-        
-        cfg = self.get_cfg()
-        
-        log_name = self.table_name
-        file_name = cfg['logging']['filename']
-        
-        log_level = cfg['logging']['level']
-        backup_days = int(cfg['logging']['backupDays'])
-        logger = logging.getLogger(log_name)
-        logger.setLevel(log_level)
-        log_dir = os.path.join(os.getcwd(), 'logs')
-        log_file = os.path.join(log_dir, f'{file_name}.{self.today()}')
-        
-        # 添加文件日志处理    
-        if file_name != '':
-            if not os.path.exists(log_dir):
-                logger.info(f"创建日志文件夹 [{str(log_dir)}]")
-                os.makedirs(log_dir)
+        if not self._logger:
+            cfg = self.get_cfg()
+            
+            log_name = self.table_name
+            logger = logging.getLogger(log_name)
+            formatter = logging.Formatter(
+                # fmt='[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s [%(filename)s:%(lineno)s]',
+                fmt='[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s',
+                datefmt='%m-%d %H:%M:%S'
+                )
+            # formatter = logging.Formatter('[%m-%d %H:%M:%S] [%(levelname)s] [ %(filename)s:%(lineno)s - %(name)s ] %(message)s ')
 
-            clen_file = os.path.join(log_dir, 'file_name.%s' %
-                                    str((datetime.datetime.now() +
-                                        datetime.timedelta(days=-backup_days)).strftime('%Y-%m-%d'))
-                                    )
+            # 添加控制台日志处理器
+            console_handler = logging.StreamHandler()
+            console_handler.setFormatter(formatter)
+            logger.addHandler(console_handler)
 
-            if os.path.exists(clen_file):
-                os.remove(clen_file)
+            # 添加文件日志处理器
+            file_name = cfg['logging']['filename']
+            
+            backup_days = int(cfg['logging']['backupDays'])
+            logger.setLevel(cfg['logging']['level'])
+            log_dir = os.path.join(os.getcwd(), 'logs')
+            log_file = os.path.join(log_dir, f'{file_name}.{self.today(without_dash=False)}')
 
-            handler = logging.FileHandler(log_file, encoding='utf-8')
-            file_fmt = '[%(asctime)s] [%(levelname)s] [ %(filename)s:%(lineno)s - %(name)s ] %(message)s '
-            formatter = logging.Formatter(file_fmt)
-            handler.setFormatter(formatter)
-            logger.addHandler(handler)
+            if file_name != '':
+                if not os.path.exists(log_dir):
+                    logger.info(f"创建日志文件夹 [{str(log_dir)}]")
+                    os.makedirs(log_dir)
 
-        # 添加控制台处理器
-        console_handler = logging.StreamHandler()
-        console_fmt = '[%(asctime)s] [%(levelname)s] [ %(filename)s:%(lineno)s - %(name)s ] %(message)s '
-        console_formatter = logging.Formatter(console_fmt)
-        console_handler.setFormatter(console_formatter)
-        logger.addHandler(console_handler)
+                clen_file = os.path.join(log_dir, 'file_name.%s' %
+                                        str((datetime.datetime.now() +
+                                            datetime.timedelta(days=-backup_days)).strftime('%Y-%m-%d'))
+                                        )
 
-        logger.info(f"日志文件： [{log_file}]")
+                if os.path.exists(clen_file):
+                    os.remove(clen_file)
 
-        self._logger = logger
+                handler = logging.FileHandler(log_file, encoding='utf-8')
+                handler.setFormatter(formatter)
+                logger.addHandler(handler)
+
+
+            logger.info(f"日志文件： [{log_file}]")
+
+            self._logger = logger
+            
         return self._logger
 
     # 获取 SQL 脚本存储文件夹
@@ -306,9 +325,6 @@ class TushareSync:
 
             self.exec_sql(table_sql)
             
-            # todo, write log
-            # self.log_info(f'Execute result: Total [{count}], Succeed [{suc_cnt}] , Failed [{flt_cnt}] ')
-
 
     def query_last_sync_date(self, sql):
         """
@@ -316,7 +332,7 @@ class TushareSync:
         :param sql: 执行查询的SQL
         :return: 查询结果
         """
-        logger = self.get_logger("utils", 'data_syn.log')
+        logger = self.get_logger()
         conn = self.get_pymysql_conn()
         cursor = conn.cursor()
         cursor.execute(sql + ';')
@@ -344,17 +360,19 @@ class TushareSync:
         return date1 if date1 >= date2 else date2
     
     
-    def sync_from_tushare_to_db(self, start_date, end_date):
+    def sync_from_tushare_to_db(self, start_date, end_date) -> int:
         """
         将数据从tushare同步到数据库
 
         :param start_date: 开始时间
         :param end_date: 结束时间
-        :return: None
+        :return: 同步的记录数量
         流程:
         1. 清理历史数据
         2. 按日期循环从tushare抓取数据，并保存到数据库
         """
+
+        total_count = 0
 
         # 创建 API / Connection / Logger 对象
         ts_api = self.get_tushare_api()
@@ -363,7 +381,7 @@ class TushareSync:
         try:
             # 清理历史数据
             self.exec_sql(f"DELETE FROM {self.table_name} WHERE {self.date_column}>='{start_date}' AND {self.date_column}<='{end_date}'")
-            self.log_info(f'Execute Clean SQL {self.table_name}: {start_date} ~ {end_date}')
+            self.get_logger().info(f'清理数据: {start_date} ~ {end_date}')
 
             # 数据同步时间开始时间和结束时间, 包含前后边界
             start = self.str_to_date(start_date)
@@ -371,45 +389,81 @@ class TushareSync:
 
             date = start
             while date <= end:
-                step_date = str(date.strftime('%Y%m%d'))
+                date_str = self.date_to_str(date)
                 offset = 0
+                
                 while True:
-                    self.log_info(f"Tushare API: {self.api_name} {self.date_column}[{step_date}] from offset[{offset}] limit[{self.limit}]")
-                    data = self.query_tushare(step_date, offset)
-                    if data.last_valid_index() is not None:
-                        size = data.last_valid_index() + 1
-                        self.log_info(f"Write [{size}] records into table [{self.table_name}]")
-                        
-                        self.save_datafame_to_db(data)
-
-                        offset = offset + size
-                        if size < self.limit:
+                    # 从Tushare抓取数据，为防止网络失败，最多抓取 MAX_RETRY 次
+                    # self.get_logger().info(f"开始 Tushare 抓取数据: {date_str},{offset},{self.limit}")
+                    tushare_data = None
+                    retry = 0
+                    while retry < self._MAX_RETRY:
+                        tushare_data = self.query_tushare(date_str, offset)
+                        retry += 1
+                        if tushare_data is not None:
                             break
-                    else:
+                        else:
+                            # 多休息一会
+                            time.sleep(self.interval * 5)
+                    if tushare_data is None:
+                        self.get_logger().error(f"TuShare抓取数据失败, {date_str},{offset},{self.limit}")
                         break
-                # 更新下一次微批时间段
-                date = date + datetime.timedelta(days=1)
-                break
+
+                    rows_count = len(tushare_data)
+                    if rows_count>0:
+                        # 如果有数据，将数据写入到数据库中
+                        # 一般非工作日没有数据
+                        self.save_datafame_to_db(tushare_data)
+                        # self.get_logger().info(f" 写入记录数: Write [{rows_count}] records into table [{self.table_name}]")
+
+                        # 更新偏移量
+                        offset = offset + rows_count
+                        total_count += rows_count
+
+                    # 如果数据量小于限制，说明已经当日数据已经取完，退出循环，抓取下一日
+                    if rows_count < self.limit:
+                        break
+                        
+                sync_details = f"导入: {offset}" if offset>0 else "无数据"
+                sync_details = f"本日{sync_details}, 累计: {total_count}"
+                
+                self.get_logger().info(f"{date_str} {sync_details}")
+                date += datetime.timedelta(days=1)
+
         except Exception as e:
-            self.log_error("Get Exception[%s]" % e.__cause__)
+            self.get_logger().error(f"异常错误: {str(e)}")
+            
+        return total_count
 
-    def date_to_str(self, date):
-        return datetime.datetime.strftime(date, '%Y%m%d')
+    def date_to_str(self, date, without_dash=True):
+        if without_dash:
+            return datetime.datetime.strftime(date, '%Y%m%d')
+        else:
+            return datetime.datetime.strftime(date, '%Y-%m-%d')
     
-    def str_to_date(self, date_str):
-        return datetime.datetime.strptime(date_str, '%Y%m%d')
+    def str_to_date(self, date_str, without_dash=True):
+        if without_dash:
+            return datetime.datetime.strptime(date_str, '%Y%m%d')
+        else:
+            return datetime.datetime.strptime(date_str, '%Y-%m-%d')
 
-    def today(self):
-        return self.date_to_str(datetime.datetime.today())
+    def today(self, without_dash=True):
+        return self.date_to_str(datetime.datetime.today(), without_dash)
 
 
     def full_sync(self):
         """
         全量初始化表数据
         """
-        self.create_table(True)
+        self.get_logger().info(f"开始全量同步")
+        
+        self.create_table(drop_exist=True)
+        self.get_logger().info(f"数据库建表: [{self.table_name}]")
+        
         end_date = self.today()
-        self.sync_from_tushare_to_db(self.BEGIN_DATE, end_date)
+        total_count = self.sync_from_tushare_to_db(self.BEGIN_DATE, end_date)
+        
+        self.get_logger().info(f"全量同步完成, 写入 [{total_count}] 条记录")
 
 
     def incremental_sync(self):
@@ -417,21 +471,24 @@ class TushareSync:
         增量同步数据
         """
 
+        self.get_logger().info(f"开始增量同步")
+
         # 查询历史最大同步日期
         last_date = self._fetch_one_from_db(f"select max({self.date_column}) from {self.table_name}")
         start_date = self.max_date(last_date, self.BEGIN_DATE)
         end_date = self.today()
 
-        self.sync_from_tushare_to_db(start_date, end_date)
+        total_count = self.sync_from_tushare_to_db(start_date, end_date)
+        self.get_logger().info(f"增量同步完成, 写入 [{total_count}] 条记录")
 
 
 def test_get_fields(sync):
     print(sync._extract_fields_from_sql_script())
 
-def test_log(sync):
-    sync.log_info("test log info")
-    sync.log_warn("test log warn")
-    sync.log_error("test log error")
+# def test_log(sync):
+#     sync.log_info("test log info")
+#     sync.log_warning("test log warning")
+#     sync.log_error("test log error")
 
 def test_table_exist(sync):
     print(sync._table_exist())
@@ -440,21 +497,33 @@ def test_create_table(sync):
     sync.create_table(True)
 
 def test_fetch_one_from_db(sync):
-    print(sync._fetch_one_from_db("select count(1) from stock_basic"))
+    print(sync._fetch_one_from_db("select * from t"))
+    
+def test_exec_sql(sync):
+    print(sync.exec_sql("insert into t values(999, 888)"))
 
 def test_query_tushare(sync):
     print(sync.query_tushare("20241204", 0))
 
 def test_save_dataframe_to_db(sync):
-    sync.save_datafame_to_db(sync.query_tushare("20241204", 0))
+    sync.save_datafame_to_db(sync.query_tushare("20241204"))
+    
+def test_full_sync(sync):
+    sync.full_sync()
+
+def test_incremental_sync(sync):
+    sync.incremental_sync()
 
 
 if __name__ == '__main__':
-    sync = TushareSync("stock_basic", "stock_basic", "trade_date")
+    sync = TushareSync("daily", "daily", "trade_date")
     
     # test_get_fields(sync)
     # test_log(sync)
     # test_table_exist(sync)
     # test_create_table(sync)
-    test_fetch_one_from_db(sync)
-
+    # test_fetch_one_from_db(sync)
+    # test_exec_sql(sync)
+    # test_query_tushare(sync)
+    # test_save_dataframe_to_db(sync)
+    test_full_sync(sync)
