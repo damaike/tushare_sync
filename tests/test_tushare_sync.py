@@ -65,7 +65,7 @@ class TestTushareSync(unittest.TestCase):
         mock_ts_api.return_value = mock_api
         
         with patch.object(self.sync, 'get_tushare_api', return_value=mock_api):
-            self.sync.query_tushare("20230101", 0, sleep=False)
+            self.sync.query_tushare_oneday("20230101", 0, sleep=False)
             mock_api.query.assert_called_once()
 
 if __name__ == '__main__':

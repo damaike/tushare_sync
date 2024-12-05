@@ -17,13 +17,18 @@
     - 从TuShare API 获取数据失败时，打印错误信息
 """
 
+"""
+TODO:
+2. 大数据量考虑使用 LOAD LOCAL INFILE 导入
+"""
+
 import configparser
 import os, time, datetime
 import logging
 
-import pandas as pd
-import pymysql, sqlalchemy
+import sqlalchemy
 import tushare as ts
+
 
 class TushareSync:
     _BEGIN_DATE = '20100101' # 同步数据最早开始日期
@@ -193,7 +198,7 @@ class TushareSync:
             conn.commit()
         return result
     
-    # 执行一条 SQL 语句，返回结果中的第一个值
+    # 执行 SQL 语句，返回结果中的第一个值
     def _fetch_one_from_db(self, sql):
         return self.exec_sql(sql).fetchone()[0]
 
@@ -214,7 +219,32 @@ class TushareSync:
         
         return self._tushare_api
 
-    def query_tushare(self, date, offset=0, sleep=True):
+    def query_tushare_oneday(self, date, offset=0, sleep=True):
+        return self.query_tushare_period(date, date, offset, sleep)
+    
+        # """
+        # 执行tushare API 函数
+        # 自动休眠 interval 秒，防止对tushare API 的频繁调用
+        # """
+        # try:
+        #     ts_api = self.get_tushare_api()
+        #     data = ts_api.query(self.api_name,
+        #                         **{
+        #                             self.date_column: date,
+        #                             "start_date": date,
+        #                             "end_date": date,
+        #                             "offset": offset,
+        #                             "limit": self.limit
+        #                         },
+        #                         fields=self.fields)
+        #     if sleep:
+        #         time.sleep(self.interval)
+        #     return data
+        # except Exception as e:
+        #     return None
+
+    
+    def query_tushare_period(self, start_date, end_date, offset=0, sleep=True):
         """
         执行tushare API 函数
         自动休眠 interval 秒，防止对tushare API 的频繁调用
@@ -223,9 +253,9 @@ class TushareSync:
             ts_api = self.get_tushare_api()
             data = ts_api.query(self.api_name,
                                 **{
-                                    self.date_column: date,
-                                    "start_date": date,
-                                    "end_date": date,
+                                    self.date_column: start_date,
+                                    "start_date": start_date,
+                                    "end_date": end_date,
                                     "offset": offset,
                                     "limit": self.limit
                                 },
@@ -235,7 +265,7 @@ class TushareSync:
             return data
         except Exception as e:
             return None
-    
+
     
     # def log_info(self, msg):
     #     self.get_logger().info(msg)
@@ -398,7 +428,7 @@ class TushareSync:
                     tushare_data = None
                     retry = 0
                     while retry < self._MAX_RETRY:
-                        tushare_data = self.query_tushare(date_str, offset)
+                        tushare_data = self.query_tushare_oneday(date_str, offset)
                         retry += 1
                         if tushare_data is not None:
                             break
