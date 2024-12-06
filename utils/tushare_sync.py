@@ -3,6 +3,8 @@
 1. 提供配置信息加载函数
 1. 提供数据库 Engine or Connection 对象创建函数
 2. 提供 tushare DataApi 对象函数
+
+注意：周线数据在周五，月线数据在月末最后一个交易日
 """
 
 """
@@ -36,11 +38,13 @@ class TushareSync:
     _INTERVAL = 2 # 每次同步数据间隔时间
     _MAX_RETRY = 3 # 最大重试次数
 
-    def __init__(self, table_name, api_name, date_column, end_date=""):
+    def __init__(self, table_name, api_name="", date_column="trade_date", end_date=""):
         self.limit = TushareSync._LIMIT
         self.interval = TushareSync._INTERVAL
-
+        
         self._init_env()
+        if not api_name:
+            api_name = table_name
         self.set_sync_setting(table_name, api_name, date_column, end_date)
 
     # 初始化环境变量
@@ -219,8 +223,8 @@ class TushareSync:
         
         return self._tushare_api
 
-    def query_tushare_oneday(self, date, offset=0, sleep=True):
-        return self.query_tushare_period(date, date, offset, sleep)
+    def query_tushare_oneday(self, date, ts_code="", offset=0, sleep=True):
+        return self.query_tushare_period(date, date, ts_code=ts_code, offset=offset, sleep=sleep)
     
         # """
         # 执行tushare API 函数
@@ -244,27 +248,49 @@ class TushareSync:
         #     return None
 
     
-    def query_tushare_period(self, start_date, end_date, offset=0, sleep=True):
+    def query_tushare_period(self, start_date, end_date, ts_code="", offset=0, sleep=True):
         """
         执行tushare API 函数
         自动休眠 interval 秒，防止对tushare API 的频繁调用
+        注意：
+            1. ts_code为空时, 只能同步单个日期数据，不能同步时间段数据
+            2. 周线数据在周五，月线数据在月末最后一个交易日
         """
         try:
             ts_api = self.get_tushare_api()
-            data = ts_api.query(self.api_name,
-                                **{
-                                    self.date_column: start_date,
-                                    "start_date": start_date,
-                                    "end_date": end_date,
-                                    "offset": offset,
-                                    "limit": self.limit
-                                },
-                                fields=self.fields)
+            params = {
+                # self.date_column: start_date,
+                # "start_date": start_date,
+                # "end_date": end_date,
+                "offset": offset,
+                "limit": self.limit
+            }
+
+            if start_date==end_date: # 单个日期
+                params.update({self.date_column: start_date})
+            else: # 时间段
+                params.update({"start_date": start_date, "end_date": end_date})
+
+            if ts_code:
+                params["ts_code"] = ts_code
+
+            data = ts_api.query(self.api_name, **params, fields=self.fields)
+
             if sleep:
                 time.sleep(self.interval)
+                
             return data
         except Exception as e:
             return None
+        
+    def _test_tushare(self, api_name, params, fields="", offset=0, limit=0):
+        if not fields:
+            fields = self.fields
+        if limit==0:
+            limit = self.limit
+            
+        ts_api = self.get_tushare_api()
+        return ts_api.query(api_name, **params, fields=fields, offset=offset, limit=limit)
 
     
     # def log_info(self, msg):
@@ -428,7 +454,7 @@ class TushareSync:
                     tushare_data = None
                     retry = 0
                     while retry < self._MAX_RETRY:
-                        tushare_data = self.query_tushare_oneday(date_str, offset)
+                        tushare_data = self.query_tushare_oneday(date_str, offset=offset)
                         retry += 1
                         if tushare_data is not None:
                             break
@@ -515,11 +541,6 @@ class TushareSync:
 def test_get_fields(sync):
     print(sync._extract_fields_from_sql_script())
 
-# def test_log(sync):
-#     sync.log_info("test log info")
-#     sync.log_warning("test log warning")
-#     sync.log_error("test log error")
-
 def test_table_exist(sync):
     print(sync._table_exist())
 
@@ -532,21 +553,50 @@ def test_fetch_one_from_db(sync):
 def test_exec_sql(sync):
     print(sync.exec_sql("insert into t values(999, 888)"))
 
-def test_query_tushare(sync):
-    print(sync.query_tushare("20241204", 0))
+def test_query_tushare_oneday(sync):
+    print(sync.query_tushare_oneday("20241129"))
+
+def test_query_tushare_period(sync):
+    print(sync.query_tushare_period("20240101", "20241204", ts_code="000001.SZ"))
+
+def test_query_tushare_oneday_with_tscode(sync):
+    print(sync.query_tushare_oneday("20160105", ts_code="600036.SH"))
+    
+def test_query_tushare_period(sync):
+    print(sync.query_tushare_period("20241101", "20241204"))
+
+def test_query_tushare_period_with_tscode(sync):
+    print(sync.query_tushare_period("20241101", "20241204", ts_code="000001.SZ,600036.SH"))
 
 def test_save_dataframe_to_db(sync):
-    sync.save_datafame_to_db(sync.query_tushare("20241204"))
+    sync.save_datafame_to_db(sync.query_tushare_oneday("20241204"))
     
 def test_full_sync(sync):
     sync.full_sync()
 
 def test_incremental_sync(sync):
     sync.incremental_sync()
+    
+def test_sync_all_tables(sync):
+    tables = ["stock_basic", "trade_cal", "daily", "weekly", "monthly", 
+            "bak_basic", "bak_daily", "concept", "concept_detail", "cyq_chips", "cyq_perf", 
+            "daily", "disclosure_date", "express", "fina_indicator", "fina_mainbz", "forecast", 
+            "ggt_daily", "ggt_top10", "hs_const", "hsgt_top10", "margin_detail", "money_flow", 
+            "money_flow_hsgt", "monthly", "name_change", "repurchase", "share_float", 
+            "stk_holder_number", "stk_limit", "stk_rewards", "stock_basic", "top_inst", 
+             "top_list", "trade_cal", "weekly"]
+    
+    for table in tables:
+        TushareSync(table).full_sync()
+
 
 
 if __name__ == '__main__':
-    sync = TushareSync("daily", "daily", "trade_date")
+    # sync = TushareSync("daily", api_name="pro_bar", fields=["ts_code", "trade_date", "open", "high", "low", "close", "pre_close", "change", "pct_chg", "vol", "amount"])
+    sync = TushareSync("stk_factor_pro")
+    print(sync.fields)
+    
+    
     
     # test_get_fields(sync)
     # test_log(sync)
@@ -554,6 +604,30 @@ if __name__ == '__main__':
     # test_create_table(sync)
     # test_fetch_one_from_db(sync)
     # test_exec_sql(sync)
-    # test_query_tushare(sync)
+    # test_query_tushare_oneday(sync)
+    # test_query_tushare_oneday_with_tscode(sync)
+    # test_query_tushare_period(sync)
+    # test_query_tushare_period_with_tscode(sync)
     # test_save_dataframe_to_db(sync)
-    test_full_sync(sync)
+   
+    # test_full_sync(sync)
+    # test_incremental_sync(sync)
+
+    # 测试表描述转SQL
+    test_desc = """index_basic 指数基本信息
+ts_code	str	TS代码
+name	str	简称
+fullname	str	指数全称
+market	str	市场
+publisher	str	发布方
+index_type	str	指数风格
+category	str	指数类别
+base_date	str	基期
+base_point	float	基点
+list_date	str	发布日期
+weight_rule	str	加权方式
+desc	str	描述
+exp_date	str	终止日期"""
+    
+    print("\n测试表描述转SQL:")
+    print(convert_table_desc_to_sql(test_desc))

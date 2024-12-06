@@ -1,4 +1,4 @@
--- stock.daily_p definition
+-- stock.daily definition
 
 DROP TABLE IF EXISTS `daily`;
 CREATE TABLE `daily`
