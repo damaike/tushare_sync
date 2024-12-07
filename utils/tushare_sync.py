@@ -1,10 +1,44 @@
 """
-数据同步类
-1. 提供配置信息加载函数
-1. 提供数据库 Engine or Connection 对象创建函数
-2. 提供 tushare DataApi 对象函数
+数据同步类，用于将 Tushare 数据同步到本地数据库
 
-注意：周线数据在周五，月线数据在月末最后一个交易日
+主要功能:
+1. 提供配置信息加载
+2. 提供数据库连接对象创建
+3. 提供 Tushare API 对象创建
+4. 支持全量同步和增量同步
+5. 支持从 SQL 文件中读取表结构和配置
+
+属性:
+    table_name (str): 数据表名
+    api_name (str): Tushare API 名称，默认与表名相同
+    date_column (str): 日期字段名，默认为 'trade_date'
+    fields (list): 需要同步的字段列表
+    extra_params (dict): 调用 Tushare API 的额外参数
+    is_increasing (bool): 数据是否递增，默认为 True
+    end_date (str): 同步截止日期，默认为当天
+    limit (int): 每次从 Tushare 获取的数据量限制
+    interval (float): 每次调用 API 的间隔时间(秒)
+
+配置说明:
+1. SQL 文件中可以通过注释定义以下配置:
+   - api_name: Tushare API 名称，默认和表名相同
+   - date_column: 默认值trade_date；日期字段名，调用 tushare API 时，会使用该字段作为日期参数
+   - extra_params: 默认空；传给 tushare API 的额外参数
+   - is_increasing: 是否递增表， 默认 True；递增表可以使用 increamental_sync 函数，非递增表只能使用 full_sync 函数
+   - end_date: 结束日期
+
+使用示例:
+    # 全量同步
+    sync = TushareSync("daily")
+    sync.full_sync()
+    
+    # 增量同步
+    sync = TushareSync("daily")
+    sync.incremental_sync()
+    
+    # 更新基础数据
+    sync = TushareSync("stock_basic")
+    sync.update()
 """
 
 """
@@ -31,21 +65,57 @@ import logging
 import sqlalchemy
 import tushare as ts
 
-
 class TushareSync:
+    
+    _CFG_FILENAME = 'application.ini'
+
     _BEGIN_DATE = '20100101' # 同步数据最早开始日期
-    _LIMIT = 10000 # 每次从tushare同步数据量
-    _INTERVAL = 2 # 每次同步数据间隔时间
+    _LIMIT = 50000 # 每次从tushare同步数据量
+    _INTERVAL = 0.5 # 每次同步数据间隔时间
     _MAX_RETRY = 3 # 最大重试次数
 
-    def __init__(self, table_name, api_name="", date_column="trade_date", end_date=""):
-        self.limit = TushareSync._LIMIT
+
+    _DEFINED_KEYS = ['api_name', 'date_column', 'extra_params', 'is_increasing']
+    _DEFAULT_DATE_COLUMN = "trade_date"
+
+    # def __init__(self, table_name, api_name="", date_column="", end_date="", extra_params={}, limit=0):
+    def __init__(self, table_name, limit=0):
+        self.limit = limit if limit>0 else TushareSync._LIMIT
         self.interval = TushareSync._INTERVAL
         
         self._init_env()
-        if not api_name:
-            api_name = table_name
-        self.set_sync_setting(table_name, api_name, date_column, end_date)
+        self.table_name = table_name
+        self.end_date = self.today()
+
+        # temp_api_name = api_name
+        # if not temp_api_name:
+        #     temp_api_name = table_name
+        # self.set_setting(temp_api_name, date_column, end_date, extra_params)
+
+        sql_data = self._extract_data_from_sql_script()
+        self.fields = sql_data["fields"]
+        # 参数优先级高于sql脚本中的定义
+        if "date_column" in sql_data:
+            self.date_column = sql_data["date_column"]
+        if "api_name" in sql_data:
+            self.api_name = sql_data["api_name"]
+        else:
+            self.api_name = self.table_name
+        if "end_date" in sql_data:
+            self.end_date = sql_data["end_date"]
+
+        if "extra_params" in sql_data:
+            try:
+                self.extra_params = eval(sql_data["extra_params"])
+            except Exception as e:
+                pass
+
+        if "is_increasing" in sql_data:
+            self.is_increasing = False if sql_data["is_increasing"].to =="false" else True
+
+        if not self.end_date:
+            self.end_date = self.today()
+    
 
     # 初始化环境变量
     def _init_env(self):
@@ -55,20 +125,25 @@ class TushareSync:
         # self._mysql_conn = None
         self._sqlalchemy_db_engine = None
 
+        self.fields = []
+        self.table_name, self.api_name = "", ""
+        self.date_column = TushareSync._DEFAULT_DATE_COLUMN
+        self.extra_params = {}
+        self.is_increasing = True
+        self.end_date = ""
+
     # 设置同步相关参数
-    def set_sync_setting(self, table_name, api_name, date_column, end_date=""):
-        self.table_name = table_name
-        self.api_name = api_name
-        self.date_column = date_column
-        self.fields = self._extract_fields_from_sql_script()
-        if not end_date:
-            end_date = self.today()
-        self.end_date = end_date
+    def set_setting(self, api_name="", date_column="trade_date", end_date="", extra_params={}):
+        if api_name:
+            self.api_name = api_name
+        if date_column:
+            self.date_column = date_column
+        if extra_params:
+            self.extra_params = extra_params
+        if end_date:
+            self.end_date = end_date
 
     def __del__(self):
-        # if self._mysql_conn:
-        #     self._mysql_conn.close()
-
         if self._sqlalchemy_db_engine:
             self._sqlalchemy_db_engine.dispose()
 
@@ -77,20 +152,21 @@ class TushareSync:
     def BEGIN_DATE(self):
         return self._BEGIN_DATE 
     
-    # 加载配置信息函数
     def get_cfg(self):
+        # 加载配置信息函数
+        # TODO: 检查必须配置是否存在，否则抛出异常
+        # TODO: 改为单例模式
+
         if self._cfg is None:
             cfg = configparser.ConfigParser()
-            file_name = os.path.join(os.path.dirname(__file__), '../application.ini')
-            file_name = os.path.abspath(file_name)
-            cfg.read(file_name)
+            cfg.read(os.path.join(os.getcwd(), self._CFG_FILENAME))
             self._cfg = cfg
         
         return self._cfg
 
     # 获取 SQLAlchemy Connection 对象
     def get_db_engine(self):
-        if self._sqlalchemy_db_engine is None:
+        if not self._sqlalchemy_db_engine:
             cfg = self.get_cfg()
             db_host = cfg['mysql']['host']
             db_user = cfg['mysql']['user']
@@ -116,16 +192,35 @@ class TushareSync:
     #     return self._mysql_conn
     
 
-    def _extract_fields_from_sql_script(self):
-        # 从建表sql脚本中读取建表SQL语句
+    def _extract_data_from_sql_script(self, sql_script=""):
+        """
+        从建表sql脚本中获取 fields, api_name, date_column
 
+        Args:
+            sql_script: 建表sql脚本；默认是从 table_filepath 中读取
+        Returns:
+            dict: 一定包含 fields, 
+                可能包涵 api_name, date_column, extra_params 的键值；在 TushareSync._DEFINED_KEYS 中定义
+        """
+        ret = {}
+
+        if not sql_script:
+            sql_script = self._read_table_sql()
         # 按行分割SQL语句
-        lines = self._read_table_sql().split('\n')
-        columns = []
+        lines = sql_script.split('\n')
+        columns, api_name, date_column = [], "", ""
         
         # 遍历每一行
         for line in lines:
             line = line.strip()
+
+            for key in TushareSync._DEFINED_KEYS:
+                key_tag1 = f'-- {key}:'
+                key_tag2 = f'--{key}:'
+                if line.startswith(key_tag1) or line.startswith(key_tag2):
+                    ret[key] = line.split(':', 1)[1].strip()
+                    continue
+
             # 跳过空行和非字段定义行
             if not line or line.startswith(('CREATE', 'DROP', ')', 'ENGINE', 'UNIQUE', '/*!', 'PARTITION', '--')):
                continue
@@ -138,7 +233,8 @@ class TushareSync:
                     continue
                 columns.append(column_name)
         
-        return columns
+        ret["fields"] = columns
+        return ret
 
     def _read_table_sql(self):
         """
@@ -204,7 +300,11 @@ class TushareSync:
     
     # 执行 SQL 语句，返回结果中的第一个值
     def _fetch_one_from_db(self, sql):
-        return self.exec_sql(sql).fetchone()[0]
+        result = self.exec_sql(sql)
+        if result:
+            return result.fetchone()[0]
+        else:
+            return None
 
     # 将tushare dataframe 数据写入数据库, 使用 SQLAlchemy
     def save_datafame_to_db(self, data, if_exists="append"):
@@ -223,8 +323,8 @@ class TushareSync:
         
         return self._tushare_api
 
-    def query_tushare_oneday(self, date, ts_code="", offset=0, sleep=True):
-        return self.query_tushare_period(date, date, ts_code=ts_code, offset=offset, sleep=sleep)
+    def query_tushare_oneday(self, date, ts_code="", offset=0, extra_params={}, sleep=True):
+        return self.query_tushare_period(date, date, ts_code=ts_code, offset=offset, extra_params=extra_params, sleep=sleep)
     
         # """
         # 执行tushare API 函数
@@ -248,7 +348,7 @@ class TushareSync:
         #     return None
 
     
-    def query_tushare_period(self, start_date, end_date, ts_code="", offset=0, sleep=True):
+    def query_tushare_period(self, start_date, end_date, ts_code="", offset=0, extra_params={}, sleep=True):
         """
         执行tushare API 函数
         自动休眠 interval 秒，防止对tushare API 的频繁调用
@@ -256,24 +356,30 @@ class TushareSync:
             1. ts_code为空时, 只能同步单个日期数据，不能同步时间段数据
             2. 周线数据在周五，月线数据在月末最后一个交易日
         """
+        if start_date!=end_date and not ts_code:
+            raise Exception("当 start_date 和 end_date 不同时，ts_code 不能为空")
+        
+        ts_api = self.get_tushare_api()
+        params = {
+            # self.date_column: start_date,
+            # "start_date": start_date,
+            # "end_date": end_date,
+            "offset": offset,
+            "limit": self.limit
+        }
+
+        if start_date==end_date: # 单个日期
+            params.update({self.date_column: start_date})
+        else: # 时间段
+            params.update({"start_date": start_date, "end_date": end_date})
+
+        if ts_code:
+            params["ts_code"] = ts_code
+
+        if extra_params:
+            params.update(extra_params)
+
         try:
-            ts_api = self.get_tushare_api()
-            params = {
-                # self.date_column: start_date,
-                # "start_date": start_date,
-                # "end_date": end_date,
-                "offset": offset,
-                "limit": self.limit
-            }
-
-            if start_date==end_date: # 单个日期
-                params.update({self.date_column: start_date})
-            else: # 时间段
-                params.update({"start_date": start_date, "end_date": end_date})
-
-            if ts_code:
-                params["ts_code"] = ts_code
-
             data = ts_api.query(self.api_name, **params, fields=self.fields)
 
             if sleep:
@@ -430,10 +536,6 @@ class TushareSync:
 
         total_count = 0
 
-        # 创建 API / Connection / Logger 对象
-        ts_api = self.get_tushare_api()
-        connection = self.get_db_engine()
-
         try:
             # 清理历史数据
             self.exec_sql(f"DELETE FROM {self.table_name} WHERE {self.date_column}>='{start_date}' AND {self.date_column}<='{end_date}'")
@@ -450,11 +552,11 @@ class TushareSync:
                 
                 while True:
                     # 从Tushare抓取数据，为防止网络失败，最多抓取 MAX_RETRY 次
-                    # self.get_logger().info(f"开始 Tushare 抓取数据: {date_str},{offset},{self.limit}")
+                    # self.get_logger().info(f"开始 Tushare ��取数据: {date_str},{offset},{self.limit}")
                     tushare_data = None
                     retry = 0
                     while retry < self._MAX_RETRY:
-                        tushare_data = self.query_tushare_oneday(date_str, offset=offset)
+                        tushare_data = self.query_tushare_oneday(date_str, offset=offset, extra_params=self.extra_params)
                         retry += 1
                         if tushare_data is not None:
                             break
@@ -507,9 +609,28 @@ class TushareSync:
         return self.date_to_str(datetime.datetime.today(), without_dash)
 
 
+    def update(self):
+        """
+        一次性更新全部数据，适合基础数据表
+        1. 清理数据
+        2. 从tushare 一次性抓取数据，存入数据库
+        """
+        self.get_logger().info(f"开始更新")
+
+        total_count = 0
+
+        self.create_table(drop_exist=True)
+        tushare_data = self.query_tushare_oneday(self.today())
+        self.save_datafame_to_db(tushare_data)
+        total_count = len(tushare_data)
+        
+        self.get_logger().info(f"更新完成, 写入 [{total_count}] 条记录")
+    
     def full_sync(self):
         """
-        全量初始化表数据
+        全量初始化表数据，适合每日有新数据的表，比如 daily, weekly, monthly, stk_factor_pro
+        1. 清理历史数据
+        2. 从 tushare 从BEGIN_DATE 到当前日期，按日期抓取数据，并保存到数据库
         """
         self.get_logger().info(f"开始全量同步")
         
@@ -524,7 +645,9 @@ class TushareSync:
 
     def incremental_sync(self):
         """
-        增量同步数据
+        增量同步数据，适合每日有新数据的表，比如 daily, weekly, monthly, stk_factor_pro
+        1. 清理历史数据
+        2. 从 tushare 从数据库的 last_sync_date 到当前日期，按日期抓取数据，并保存到数据库
         """
 
         self.get_logger().info(f"开始增量同步")
@@ -536,6 +659,15 @@ class TushareSync:
 
         total_count = self.sync_from_tushare_to_db(start_date, end_date)
         self.get_logger().info(f"增量同步完成, 写入 [{total_count}] 条记录")
+
+    def sync(self):
+        if self.is_increasing:
+            if self._table_exist():
+                self.incremental_sync()
+            else:
+                self.full_sync()
+        else:
+            self.update()
 
 
 def test_get_fields(sync):
@@ -589,15 +721,16 @@ def test_sync_all_tables(sync):
     for table in tables:
         TushareSync(table).full_sync()
 
+def test_sql_config():
+    sync = TushareSync("fund_nav")
+    sync.sync()
+    # print(sync.api_name, sync.date_column, sync.extra_params)
 
 
 if __name__ == '__main__':
     # sync = TushareSync("daily", api_name="pro_bar", fields=["ts_code", "trade_date", "open", "high", "low", "close", "pre_close", "change", "pct_chg", "vol", "amount"])
-    sync = TushareSync("stk_factor_pro")
-    print(sync.fields)
-    
-    
-    
+    # sync = TushareSync("stk_factor_pro")
+
     # test_get_fields(sync)
     # test_log(sync)
     # test_table_exist(sync)
@@ -613,21 +746,4 @@ if __name__ == '__main__':
     # test_full_sync(sync)
     # test_incremental_sync(sync)
 
-    # 测试表描述转SQL
-    test_desc = """index_basic 指数基本信息
-ts_code	str	TS代码
-name	str	简称
-fullname	str	指数全称
-market	str	市场
-publisher	str	发布方
-index_type	str	指数风格
-category	str	指数类别
-base_date	str	基期
-base_point	float	基点
-list_date	str	发布日期
-weight_rule	str	加权方式
-desc	str	描述
-exp_date	str	终止日期"""
-    
-    print("\n测试表描述转SQL:")
-    print(convert_table_desc_to_sql(test_desc))
+    test_sql_config()
