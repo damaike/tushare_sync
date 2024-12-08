@@ -26,6 +26,8 @@
    - extra_params: 默认空；传给 tushare API 的额外参数
    - is_increasing: 是否递增表， 默认 True；递增表可以使用 increamental_sync 函数，非递增表只能使用 full_sync 函数
    - end_date: 结束日期
+   - limit: 每次从 Tushare 获取的数据量限制
+   - interval: 每次调用 API 的间隔时间(秒)
 
 使用示例:
     # 全量同步
@@ -65,6 +67,7 @@ import logging
 import sqlalchemy
 import tushare as ts
 
+
 class TushareSync:
     
     _CFG_FILENAME = 'application.ini'
@@ -73,12 +76,20 @@ class TushareSync:
     _LIMIT = 50000 # 每次从tushare同步数据量
     _INTERVAL = 0.5 # 每次同步数据间隔时间
     _MAX_RETRY = 3 # 最大重试次数
-
-
-    _DEFINED_KEYS = ['api_name', 'date_column', 'extra_params', 'is_increasing']
     _DEFAULT_DATE_COLUMN = "trade_date"
 
-    # def __init__(self, table_name, api_name="", date_column="", end_date="", extra_params={}, limit=0):
+    class Flags:
+        API_NAME = "api_name"
+        DATE_COLUMN = "date_column"
+        END_DATE = "end_date"
+        EXTRA_PARAMS = "extra_params"
+        IS_INCREASING = "is_increasing"
+        LIMIT = "limit"
+        INTERVAL = "interval"
+
+    _FLAG_KEYS = [Flags.API_NAME, Flags.DATE_COLUMN, Flags.END_DATE, Flags.EXTRA_PARAMS, Flags.IS_INCREASING, Flags.LIMIT, Flags.INTERVAL]
+
+
     def __init__(self, table_name, limit=0):
         self.limit = limit if limit>0 else TushareSync._LIMIT
         self.interval = TushareSync._INTERVAL
@@ -91,27 +102,39 @@ class TushareSync:
         # if not temp_api_name:
         #     temp_api_name = table_name
         # self.set_setting(temp_api_name, date_column, end_date, extra_params)
+        # 初始化 flags 字典,用于存储同步相关参数
+
+        # 本来想用 flags 字典存储同步相关参数，但后来发现写起来很繁琐，作罢
+        self.api_name = ""
+        self.date_column = TushareSync._DEFAULT_DATE_COLUMN
+        self.end_date = ""
+        self.extra_params = {}
+        self.is_increasing = True
 
         sql_data = self._extract_data_from_sql_script()
         self.fields = sql_data["fields"]
         # 参数优先级高于sql脚本中的定义
-        if "date_column" in sql_data:
-            self.date_column = sql_data["date_column"]
-        if "api_name" in sql_data:
-            self.api_name = sql_data["api_name"]
+        if TushareSync.Flags.DATE_COLUMN in sql_data:
+            self.date_column = sql_data[TushareSync.Flags.DATE_COLUMN]
+        if TushareSync.Flags.API_NAME in sql_data:
+            self.api_name = sql_data[TushareSync.Flags.API_NAME]
         else:
             self.api_name = self.table_name
-        if "end_date" in sql_data:
-            self.end_date = sql_data["end_date"]
+        if TushareSync.Flags.END_DATE in sql_data:
+            self.end_date = sql_data[TushareSync.Flags.END_DATE]
+        if TushareSync.Flags.LIMIT in sql_data:
+            self.limit = int(sql_data[TushareSync.Flags.LIMIT])
+        if TushareSync.Flags.INTERVAL in sql_data:
+            self.interval = float(sql_data[TushareSync.Flags.INTERVAL])
 
-        if "extra_params" in sql_data:
+        if TushareSync.Flags.EXTRA_PARAMS in sql_data:
             try:
-                self.extra_params = eval(sql_data["extra_params"])
+                self.extra_params = eval(sql_data[TushareSync.Flags.EXTRA_PARAMS])
             except Exception as e:
                 pass
 
-        if "is_increasing" in sql_data:
-            self.is_increasing = False if sql_data["is_increasing"].to =="false" else True
+        if TushareSync.Flags.IS_INCREASING in sql_data:
+            self.is_increasing = False if sql_data[TushareSync.Flags.IS_INCREASING].lower() =="false" else True
 
         if not self.end_date:
             self.end_date = self.today()
@@ -147,6 +170,35 @@ class TushareSync:
         if self._sqlalchemy_db_engine:
             self._sqlalchemy_db_engine.dispose()
 
+    def pre_process_data(self, data):
+        """
+        对从tushare API 获取的数据进行预处理
+        默认不进行处理
+        子类可重写该方法
+
+        Args:
+            data: 从tushare API 获取的数据
+
+        Returns:
+            预处理后的数据
+        """
+        return data
+    
+    def before_sync(self):
+        """
+        同步前，进行一些操作
+        默认无操作
+        子类可重写该方法
+        """
+        pass
+
+    def after_sync(self):
+        """
+        同步后，进行一些操作
+        默认无操作
+        子类可重写该方法
+        """
+        pass
 
     @property
     def BEGIN_DATE(self):
@@ -197,10 +249,10 @@ class TushareSync:
         从建表sql脚本中获取 fields, api_name, date_column
 
         Args:
-            sql_script: 建表sql脚本；默认是从 table_filepath 中读取
+            sql_script: 建表sql脚本; 默认是从 table_filepath 中读取
         Returns:
             dict: 一定包含 fields, 
-                可能包涵 api_name, date_column, extra_params 的键值；在 TushareSync._DEFINED_KEYS 中定义
+                可能包涵 api_name, date_column, extra_params 的键值；在 TushareSync._FLAG_KEYS 中定义
         """
         ret = {}
 
@@ -214,7 +266,7 @@ class TushareSync:
         for line in lines:
             line = line.strip()
 
-            for key in TushareSync._DEFINED_KEYS:
+            for key in TushareSync._FLAG_KEYS:
                 key_tag1 = f'-- {key}:'
                 key_tag2 = f'--{key}:'
                 if line.startswith(key_tag1) or line.startswith(key_tag2):
@@ -241,8 +293,11 @@ class TushareSync:
         获取建表SQL语句
         """
         table_sql = ""
-        with open(self.table_filepath(), 'r', encoding='utf-8') as f:
-            table_sql = f.read()
+        try:
+            with open(self.table_filepath(), 'r', encoding='utf-8') as f:
+                table_sql = f.read()
+        except Exception as e:
+            print(f"读取SQL文件 <{self.table_filepath()}> 失败: {e}")
         return table_sql
 
     def _table_exist(self, table_name=""):
@@ -408,56 +463,68 @@ class TushareSync:
     # def log_error(self, msg):
     #     self.get_logger().error(msg)
 
-    # 获取日志文件打印输出对象
     def get_logger(self):
+        """
+        获取日志打印对象
+
+        Returns:
+            logger: 日志打印对象
+        """
         if not self._logger:
-            cfg = self.get_cfg()
+            logger, log_file = self.create_logger()
+            logger.info(f"日志文件： [{log_file}]")
+            self._logger = logger
             
-            log_name = self.table_name
-            logger = logging.getLogger(log_name)
-            formatter = logging.Formatter(
+        return self._logger
+
+    def create_logger(self):
+        """
+        创建日志打印对象
+
+        Returns:
+            (logger, log_file): (日志打印对象，日志文件路径)
+        """
+        cfg = self.get_cfg()
+            
+        log_name = self.table_name
+        logger = logging.getLogger(log_name)
+        formatter = logging.Formatter(
                 # fmt='[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s [%(filename)s:%(lineno)s]',
                 fmt='[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s',
                 datefmt='%m-%d %H:%M:%S'
                 )
-            # formatter = logging.Formatter('[%m-%d %H:%M:%S] [%(levelname)s] [ %(filename)s:%(lineno)s - %(name)s ] %(message)s ')
 
             # 添加控制台日志处理器
-            console_handler = logging.StreamHandler()
-            console_handler.setFormatter(formatter)
-            logger.addHandler(console_handler)
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
 
             # 添加文件日志处理器
-            file_name = cfg['logging']['filename']
+        file_name = cfg['logging']['filename']
             
-            backup_days = int(cfg['logging']['backupDays'])
-            logger.setLevel(cfg['logging']['level'])
-            log_dir = os.path.join(os.getcwd(), 'logs')
-            log_file = os.path.join(log_dir, f'{file_name}.{self.today(without_dash=False)}')
+        backup_days = int(cfg['logging']['backupDays'])
+        logger.setLevel(cfg['logging']['level'])
+        log_dir = os.path.join(os.getcwd(), 'logs')
+        log_file = os.path.join(log_dir, f'{file_name}.{self.today(without_dash=False)}')
 
-            if file_name != '':
-                if not os.path.exists(log_dir):
-                    logger.info(f"创建日志文件夹 [{str(log_dir)}]")
-                    os.makedirs(log_dir)
+        if file_name != '':
+            if not os.path.exists(log_dir):
+                logger.info(f"创建日志文件夹 [{str(log_dir)}]")
+                os.makedirs(log_dir)
 
-                clen_file = os.path.join(log_dir, 'file_name.%s' %
+            clen_file = os.path.join(log_dir, 'file_name.%s' %
                                         str((datetime.datetime.now() +
                                             datetime.timedelta(days=-backup_days)).strftime('%Y-%m-%d'))
                                         )
 
-                if os.path.exists(clen_file):
-                    os.remove(clen_file)
+            if os.path.exists(clen_file):
+                os.remove(clen_file)
 
-                handler = logging.FileHandler(log_file, encoding='utf-8')
-                handler.setFormatter(formatter)
-                logger.addHandler(handler)
+            handler = logging.FileHandler(log_file, encoding='utf-8')
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
 
-
-            logger.info(f"日志文件： [{log_file}]")
-
-            self._logger = logger
-            
-        return self._logger
+        return logger,log_file
 
     # 获取 SQL 脚本存储文件夹
     def sql_folder(self):
@@ -571,12 +638,13 @@ class TushareSync:
                     if rows_count>0:
                         # 如果有数据，将数据写入到数据库中
                         # 一般非工作日没有数据
+                        tushare_data = self.pre_process_data(tushare_data)
                         self.save_datafame_to_db(tushare_data)
                         # self.get_logger().info(f" 写入记录数: Write [{rows_count}] records into table [{self.table_name}]")
 
                         # 更新偏移量
                         offset = offset + rows_count
-                        total_count += rows_count
+                        total_count += len(tushare_data)
 
                     # 如果数据量小于限制，说明已经当日数据已经取完，退出循环，抓取下一日
                     if rows_count < self.limit:
@@ -661,6 +729,10 @@ class TushareSync:
         self.get_logger().info(f"增量同步完成, 写入 [{total_count}] 条记录")
 
     def sync(self):
+        """
+        同步数据
+        """
+        self.before_sync()
         if self.is_increasing:
             if self._table_exist():
                 self.incremental_sync()
@@ -669,81 +741,5 @@ class TushareSync:
         else:
             self.update()
 
+        self.after_sync()
 
-def test_get_fields(sync):
-    print(sync._extract_fields_from_sql_script())
-
-def test_table_exist(sync):
-    print(sync._table_exist())
-
-def test_create_table(sync):
-    sync.create_table(True)
-
-def test_fetch_one_from_db(sync):
-    print(sync._fetch_one_from_db("select * from t"))
-    
-def test_exec_sql(sync):
-    print(sync.exec_sql("insert into t values(999, 888)"))
-
-def test_query_tushare_oneday(sync):
-    print(sync.query_tushare_oneday("20241129"))
-
-def test_query_tushare_period(sync):
-    print(sync.query_tushare_period("20240101", "20241204", ts_code="000001.SZ"))
-
-def test_query_tushare_oneday_with_tscode(sync):
-    print(sync.query_tushare_oneday("20160105", ts_code="600036.SH"))
-    
-def test_query_tushare_period(sync):
-    print(sync.query_tushare_period("20241101", "20241204"))
-
-def test_query_tushare_period_with_tscode(sync):
-    print(sync.query_tushare_period("20241101", "20241204", ts_code="000001.SZ,600036.SH"))
-
-def test_save_dataframe_to_db(sync):
-    sync.save_datafame_to_db(sync.query_tushare_oneday("20241204"))
-    
-def test_full_sync(sync):
-    sync.full_sync()
-
-def test_incremental_sync(sync):
-    sync.incremental_sync()
-    
-def test_sync_all_tables(sync):
-    tables = ["stock_basic", "trade_cal", "daily", "weekly", "monthly", 
-            "bak_basic", "bak_daily", "concept", "concept_detail", "cyq_chips", "cyq_perf", 
-            "daily", "disclosure_date", "express", "fina_indicator", "fina_mainbz", "forecast", 
-            "ggt_daily", "ggt_top10", "hs_const", "hsgt_top10", "margin_detail", "money_flow", 
-            "money_flow_hsgt", "monthly", "name_change", "repurchase", "share_float", 
-            "stk_holder_number", "stk_limit", "stk_rewards", "stock_basic", "top_inst", 
-             "top_list", "trade_cal", "weekly"]
-    
-    for table in tables:
-        TushareSync(table).full_sync()
-
-def test_sql_config():
-    sync = TushareSync("fund_nav")
-    sync.sync()
-    # print(sync.api_name, sync.date_column, sync.extra_params)
-
-
-if __name__ == '__main__':
-    # sync = TushareSync("daily", api_name="pro_bar", fields=["ts_code", "trade_date", "open", "high", "low", "close", "pre_close", "change", "pct_chg", "vol", "amount"])
-    # sync = TushareSync("stk_factor_pro")
-
-    # test_get_fields(sync)
-    # test_log(sync)
-    # test_table_exist(sync)
-    # test_create_table(sync)
-    # test_fetch_one_from_db(sync)
-    # test_exec_sql(sync)
-    # test_query_tushare_oneday(sync)
-    # test_query_tushare_oneday_with_tscode(sync)
-    # test_query_tushare_period(sync)
-    # test_query_tushare_period_with_tscode(sync)
-    # test_save_dataframe_to_db(sync)
-   
-    # test_full_sync(sync)
-    # test_incremental_sync(sync)
-
-    test_sql_config()

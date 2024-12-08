@@ -1,9 +1,13 @@
--- stock.daily definition
+-- daily, 股票日线行情
+
+-- limit: 10000
+-- interval: 0.5
+-- is_increasing: True
 
 DROP TABLE IF EXISTS `daily`;
 CREATE TABLE `daily`
 (
-    `ts_code`      varchar(16)        DEFAULT NULL COMMENT '股票代码',
+    `ts_code`      varchar(64)        DEFAULT NULL COMMENT '股票代码',
     `trade_date`   int                DEFAULT NULL COMMENT '交易日期',
     `open`         double             DEFAULT NULL COMMENT '开盘价',
     `high`         double             DEFAULT NULL COMMENT '最高价',

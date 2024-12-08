@@ -3,7 +3,7 @@
 DROP TABLE IF EXISTS `monthly`;
 CREATE TABLE `monthly`
 (
-    `ts_code`      varchar(16)        DEFAULT NULL COMMENT '股票代码',
+    `ts_code`      varchar(64)        DEFAULT NULL COMMENT '股票代码',
     `trade_date`   int                DEFAULT NULL COMMENT '交易日期',
     `close`        double             DEFAULT NULL COMMENT '月收盘价',
     `open`         double             DEFAULT NULL COMMENT '月开盘价',

@@ -1,8 +1,12 @@
--- stk_factor_pro，日线前复权，带技术指标 MA, MACD, KDJ
+-- stk_factor_pro，日线前复权，带技术因子 MA, MACD, KDJ
+
+-- limit: 10000
+-- interval: 0.8
+-- is_increasing: True
 
 CREATE TABLE `stk_factor_pro`
 (
-    `ts_code`          varchar(16)        DEFAULT NULL COMMENT '股票代码',
+    `ts_code`          varchar(32)        DEFAULT NULL COMMENT '股票代码',
     `trade_date`       int                DEFAULT NULL COMMENT '交易日期',
     `open_qfq`         double             DEFAULT NULL COMMENT '开盘价',
     `high_qfq`         double             DEFAULT NULL COMMENT '最高价',
